@@ -1,5 +1,6 @@
-import express from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import cors from 'cors';
+import fileUpload from 'express-fileupload';
 import { createServer } from 'http';
 import { router } from './routes/index.js';
 import { setupWebSocket, closeWebSocket } from './websocket.js';
@@ -15,8 +16,9 @@ const port = (config.get('server.port') as number) || 3001;
 const host = (config.get('server.host') as string) || 'localhost';
 
 app.use(cors());
+app.use(fileUpload({ limits: { fileSize: 50 * 1024 * 1024 } }));
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 app.use((req, res, next) => {
   const start = Date.now();

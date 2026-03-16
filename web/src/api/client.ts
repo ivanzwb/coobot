@@ -26,12 +26,24 @@ export const api = {
   getMessages: (conversationId: string, limit = 50, offset = 0) =>
     fetchAPI(`${API_BASE}/conversation/messages?conversationId=${conversationId}&limit=${limit}&offset=${offset}`),
 
-  sendMessage: (conversationId: string, content: string, clientId: string) =>
-    fetchAPI(`${API_BASE}/conversation/messages`, {
+  sendMessage: (conversationId: string, content: string, clientId: string, attachments?: Array<{ type: string; name: string; url: string }>) => {
+    const body = new FormData();
+    body.append('conversationId', conversationId);
+    body.append('content', content);
+    if (attachments) {
+      attachments.forEach((att, idx) => {
+        body.append(`attachment_${idx}_type`, att.type);
+        body.append(`attachment_${idx}_name`, att.name);
+        body.append(`attachment_${idx}_url`, att.url);
+      });
+    }
+    
+    return fetchAPI(`${API_BASE}/conversation/messages`, {
       method: 'POST',
       headers: { 'X-Client-Id': clientId, 'X-Entry-Point': 'web' },
-      body: JSON.stringify({ conversationId, content })
-    }),
+      body
+    });
+  },
 
   getTasks: (conversationId: string, limit = 50, offset = 0) =>
     fetchAPI(`${API_BASE}/tasks?conversationId=${conversationId}&limit=${limit}&offset=${offset}`),
@@ -210,5 +222,33 @@ export const api = {
     fetchAPI(`${API_BASE}/config/models/test`, {
       method: 'POST',
       body: JSON.stringify({ model: modelId })
-    })
+    }),
+
+  getDashboard: () =>
+    fetchAPI(`${API_BASE}/monitoring/dashboard`),
+
+  getHealthStatus: () =>
+    fetchAPI(`${API_BASE}/monitoring/health`),
+
+  getAlerts: (level?: string) =>
+    fetchAPI(`${API_BASE}/monitoring/alerts${level ? `?level=${level}` : ''}`),
+
+  getTaskMetrics: (timeRange?: string) =>
+    fetchAPI(`${API_BASE}/monitoring/tasks${timeRange ? `?range=${timeRange}` : ''}`),
+
+  getModelMetrics: (timeRange?: string) =>
+    fetchAPI(`${API_BASE}/monitoring/models${timeRange ? `?range=${timeRange}` : ''}`),
+
+  getResourceMetrics: () =>
+    fetchAPI(`${API_BASE}/monitoring/resources`),
+
+  acknowledgeAlert: (alertId: string) =>
+    fetchAPI(`${API_BASE}/monitoring/alerts/${alertId}/acknowledge`, { method: 'POST' }),
+
+  getImportHistory: () =>
+    fetchAPI(`${API_BASE}/knowledge/import-history`),
+
+  getDailyConsolidationHistory: () =>
+    fetchAPI(`${API_BASE}/memory-consolidations/daily/history`)
+
 };

@@ -1,15 +1,20 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
 
-interface Message {
+export interface Message {
   id: string;
   conversationId: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   createdAt: string;
+  attachments?: Array<{
+    id: string;
+    type: string;
+    url: string;
+  }>;
 }
 
-interface Task {
+export interface Task {
   id: string;
   status: string;
   triggerMode: string;
@@ -17,15 +22,38 @@ interface Task {
   triggerDecisionSummary?: string;
   complexityDecisionSummary?: string;
   arrangementStatus?: string;
+  arrangementEta?: string;
   userNotificationStage?: string;
   outputStage?: string;
   finalOutputReady?: boolean;
   createdAt: string;
   completedAt?: string;
   intakeInputSummary?: string;
+  subTasks?: Array<{
+    id: string;
+    name: string;
+    status: string;
+    agentName?: string;
+    queuePosition?: number;
+    outputSummary?: string;
+    blocking?: boolean;
+  }>;
+  waitingAnomalySummary?: string;
+  interventionRequiredReason?: string;
+  waitingThresholdBasis?: string;
+  reassessmentRequired?: boolean;
+  reassessmentType?: string;
+  previousMarkerValue?: string;
+  newMarkerValue?: string;
+  notifications?: Array<{
+    stage: string;
+    timestamp: string;
+    content?: string;
+  }>;
+  parentTaskId?: string;
 }
 
-interface TaskStep {
+export interface TaskStep {
   id: string;
   taskId: string;
   name: string;
@@ -68,7 +96,7 @@ interface AppState {
   setActiveView: (view: ViewType) => void;
   setSelectedTaskId: (taskId: string | null) => void;
   init: () => Promise<void>;
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string, attachments?: Array<{ type: string; name: string; url: string }>) => Promise<void>;
   fetchTasks: () => Promise<void>;
   fetchTaskDetail: (taskId: string) => Promise<void>;
   cancelTask: (taskId: string) => Promise<void>;
@@ -124,9 +152,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  sendMessage: async (content: string) => {
+  sendMessage: async (content: string, attachments?: Array<{ type: string; name: string; url: string }>) => {
     const { conversationId, messages } = get();
-    if (!content.trim() || !conversationId) return;
+    if ((!content.trim() && (!attachments || attachments.length === 0)) || !conversationId) return;
 
     try {
       set({ isLoading: true });
@@ -138,9 +166,22 @@ export const useAppStore = create<AppState>((set, get) => ({
         content,
         createdAt: new Date().toISOString()
       };
-      set({ messages: [...messages, userMessage] });
+      
+      let messageWithAttachments = { ...userMessage };
+      if (attachments && attachments.length > 0) {
+        messageWithAttachments = {
+          ...userMessage,
+          attachments: attachments.map(att => ({
+            id: att.name,
+            type: att.type,
+            url: att.url
+          }))
+        };
+      }
+      
+      set({ messages: [...messages, messageWithAttachments] });
 
-      const result = await api.sendMessage(conversationId, content, clientId) as { taskId: string };
+      const result = await api.sendMessage(conversationId, content, clientId, attachments) as { taskId: string };
       
       const assistantMessage: Message = {
         id: `temp-${Date.now()}-1`,
@@ -150,7 +191,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         createdAt: new Date().toISOString()
       };
       
-      const updatedMessages = [...messages, userMessage, assistantMessage];
+      const updatedMessages = [...messages, messageWithAttachments, assistantMessage];
       set({ messages: updatedMessages });
       
       const tasks = await api.getTasks(conversationId) as Task[];

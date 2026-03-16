@@ -11,6 +11,7 @@ import { AgentsPage } from './pages/AgentsPage';
 import { SkillsPage } from './pages/SkillsPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { ResultPage } from './pages/ResultPage';
+import { DashboardPage } from './pages/DashboardPage';
 
 function App() {
   const { init } = useAppStore();
@@ -34,6 +35,7 @@ function App() {
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
         </Routes>
       </div>
     </div>

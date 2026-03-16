@@ -21,6 +21,7 @@ export const messages = sqliteTable('messages', {
   visibleClientIds: text('visible_client_ids'),
   role: text('role').notNull(),
   content: text('content').notNull(),
+  attachments: text('attachments'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
 });
 

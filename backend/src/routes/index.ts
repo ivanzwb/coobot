@@ -1,9 +1,11 @@
 import { Router } from 'express';
+import fileUpload from 'express-fileupload';
 import { conversationService, taskService, attachmentService, agentService, knowledgeService, permissionService, llmAdapter, memoryConsolidationService, agentQueueService, skillInvocationService } from '../services/index.js';
 import { TriggerMode } from '../types/index.js';
 import { db } from '../db/index.js';
 
-export const router = Router();
+const router = Router();
+export { router };
 
 router.get('/health', (req, res) => {
   res.json({ 
@@ -101,14 +103,46 @@ router.post('/api/conversation/messages', async (req, res) => {
     
     const conversationId = await conversationService.getOrCreateDefaultConversation(clientId);
     
-    const { content, attachments } = req.body;
+    let content = '';
+    let attachments: Array<{ type: string; name: string; url: string }> = [];
+    
+    if (req.files) {
+      const files = req.files as { [key: string]: fileUpload.UploadedFile };
+      const fileArray = files['files'] ? [files['files']] : Object.values(files);
+      
+      content = req.body.content || '';
+      
+      for (const f of fileArray) {
+        if (f && f.data) {
+          attachments.push({
+            type: f.mimetype.startsWith('image/') ? 'image' : 'file',
+            name: f.name,
+            url: `data:${f.mimetype};base64,${f.data.toString('base64')}`
+          });
+        }
+      }
+    } else {
+      const body = req.body;
+      content = body.content || '';
+      if (body.attachment_0_type) {
+        const attachmentCount = Object.keys(body).filter(k => k.startsWith('attachment_')).length / 3;
+        for (let i = 0; i < attachmentCount; i++) {
+          attachments.push({
+            type: body[`attachment_${i}_type`],
+            name: body[`attachment_${i}_name`],
+            url: body[`attachment_${i}_url`]
+          });
+        }
+      }
+    }
     
     const messageId = await conversationService.createMessage({
       conversationId,
       entryPoint,
       originClientId: clientId,
       role: 'user',
-      content
+      content,
+      attachments: attachments.length > 0 ? attachments : undefined
     });
 
     const taskId = await taskService.createTask({

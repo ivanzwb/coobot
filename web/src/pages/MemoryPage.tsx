@@ -9,31 +9,70 @@ interface Memory {
   importance: string;
   sourceType: string;
   agentId?: string;
+  agentName?: string;
   conversationId?: string;
   taskId?: string;
   createdAt: string;
   expiresAt?: string;
 }
 
+interface Agent {
+  id: string;
+  name: string;
+  type: string;
+}
+
+interface DailyConsolidation {
+  date: string;
+  status: 'completed' | 'skipped' | 'failed';
+  memoryCount?: number;
+  note?: string;
+}
+
 export function MemoryPage() {
   const [memories, setMemories] = useState<Memory[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState<string>('');
+  const [dailyHistory, setDailyHistory] = useState<DailyConsolidation[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filterType, setFilterType] = useState<string>('');
-  const [filterImportance, setFilterImportance] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    loadAgents();
+    loadDailyHistory();
+  }, []);
 
   useEffect(() => {
     loadMemories();
-  }, []);
+  }, [selectedAgentId]);
+
+  const loadAgents = async () => {
+    try {
+      const data = await api.getAgents();
+      setAgents(data as Agent[]);
+    } catch (error) {
+      console.error('Failed to load agents:', error);
+    }
+  };
 
   const loadMemories = async () => {
     try {
       setLoading(true);
-      const data = await api.getMemories();
+      const data = await api.getMemories(selectedAgentId || undefined);
       setMemories(data as Memory[]);
     } catch (error) {
       console.error('Failed to load memories:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadDailyHistory = async () => {
+    try {
+      const data = await api.getDailyConsolidationHistory();
+      setDailyHistory(data as DailyConsolidation[]);
+    } catch (error) {
+      console.error('Failed to load daily history:', error);
     }
   };
 
@@ -44,6 +83,16 @@ export function MemoryPage() {
       loadMemories();
     } catch (error) {
       console.error('Failed to delete:', error);
+    }
+  };
+
+  const handleRerun = async (date: string) => {
+    if (!confirm(`确定要重新整理 ${date} 的记忆吗?`)) return;
+    try {
+      await api.runDailyConsolidation(selectedAgentId || undefined);
+      loadDailyHistory();
+    } catch (error) {
+      console.error('Failed to rerun:', error);
     }
   };
 
@@ -65,67 +114,102 @@ export function MemoryPage() {
     return labels[importance] || importance;
   };
 
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case 'completed': return '✓';
+      case 'skipped': return '⚠️';
+      case 'failed': return '✕';
+      default: return '○';
+    }
+  };
+
   const filteredMemories = memories.filter(m => {
-    if (filterType && m.type !== filterType) return false;
-    if (filterImportance && m.importance !== filterImportance) return false;
+    if (searchQuery && !m.summary?.toLowerCase().includes(searchQuery.toLowerCase()) && 
+        !m.content?.toLowerCase().includes(searchQuery.toLowerCase())) {
+      return false;
+    }
     return true;
   });
 
   return (
-    <div className="content">
-      <div className="card">
-        <div className="card-header">
-          <h2 className="card-title">记忆管理</h2>
-          <button className="btn btn-secondary" onClick={loadMemories}>
-            刷新
-          </button>
-        </div>
+    <div className="memory-page">
+      <div className="page-header">
+        <h2>记忆管理</h2>
+        <button className="btn btn-secondary" onClick={loadMemories}>
+          🔄 刷新
+        </button>
+      </div>
 
-        <div style={{ marginBottom: 16, display: 'flex', gap: 16 }}>
-          <div>
-            <label style={{ fontSize: 12, marginRight: 8 }}>类型:</label>
-            <select
-              className="form-input"
-              style={{ width: 'auto' }}
-              value={filterType}
-              onChange={(e) => setFilterType(e.target.value)}
-            >
-              <option value="">全部</option>
-              <option value="short_term">短期记忆</option>
-              <option value="agent">Agent记忆</option>
-              <option value="persistent">持久记忆</option>
-            </select>
-          </div>
-          <div>
-            <label style={{ fontSize: 12, marginRight: 8 }}>重要性:</label>
-            <select
-              className="form-input"
-              style={{ width: 'auto' }}
-              value={filterImportance}
-              onChange={(e) => setFilterImportance(e.target.value)}
-            >
-              <option value="">全部</option>
-              <option value="high">高</option>
-              <option value="medium">中</option>
-              <option value="low">低</option>
-            </select>
+      <div className="memory-layout">
+        <div className="memory-sidebar">
+          <div className="sidebar-section">
+            <h3>Agent 选择</h3>
+            <div className="agent-list">
+              <button 
+                className={`agent-item ${selectedAgentId === '' ? 'active' : ''}`}
+                onClick={() => setSelectedAgentId('')}
+              >
+                全部 Agent
+              </button>
+              {agents.map((agent) => (
+                <button
+                  key={agent.id}
+                  className={`agent-item ${selectedAgentId === agent.id ? 'active' : ''}`}
+                  onClick={() => setSelectedAgentId(agent.id)}
+                >
+                  <span className="agent-icon">🤖</span>
+                  {agent.name}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
-        {loading ? (
-          <div className="loading"><div className="spinner"></div></div>
-        ) : filteredMemories.length === 0 ? (
-          <div className="empty-state">
-            <h3>暂无记忆</h3>
-            <p>记忆将在任务执行过程中自动生成</p>
+        <div className="memory-main">
+          <div className="memory-toolbar">
+            <input
+              type="text"
+              className="search-input"
+              placeholder="🔍 搜索记忆..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+            <button className="btn btn-primary">
+              手动整理
+            </button>
           </div>
-        ) : (
-          <div className="task-list">
-            {filteredMemories.map((memory) => (
-              <div key={memory.id} className="task-item">
-                <div className="task-header">
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <span style={{ fontWeight: 500 }}>{memory.summary || '记忆'}</span>
+
+          {loading ? (
+            <div className="loading"><div className="spinner"></div></div>
+          ) : filteredMemories.length === 0 ? (
+            <div className="empty-state">
+              <h3>暂无记忆</h3>
+              <p>选择 Agent 后，将显示该 Agent 的记忆条目</p>
+            </div>
+          ) : (
+            <div className="memory-list">
+              <div className="list-header">
+                <span>记忆列表</span>
+                <span>{filteredMemories.length} 条</span>
+              </div>
+              {filteredMemories.map((memory) => (
+                <div key={memory.id} className="memory-item">
+                  <div className="memory-header">
+                    <div className="memory-title">
+                      <span className="memory-icon">📌</span>
+                      {memory.summary || '记忆'}
+                    </div>
+                    <div className="memory-actions">
+                      <button className="btn-link">来源</button>
+                      <button 
+                        className="btn-danger-small"
+                        onClick={() => handleDelete(memory.id)}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                  <div className="memory-meta">
                     <span className="badge badge-info">{getTypeLabel(memory.type)}</span>
                     <span className={`badge ${
                       memory.importance === 'high' ? 'badge-error' : 
@@ -133,26 +217,50 @@ export function MemoryPage() {
                     }`}>
                       {getImportanceLabel(memory.importance)}
                     </span>
+                    {memory.agentName && <span className="meta-agent">{memory.agentName}</span>}
+                    <span className="meta-date">
+                      {new Date(memory.createdAt).toLocaleDateString()}
+                    </span>
                   </div>
-                  <button
-                    className="btn btn-danger"
-                    style={{ padding: '4px 8px', fontSize: 12 }}
-                    onClick={() => handleDelete(memory.id)}
+                  <div className="memory-content">
+                    {memory.content?.substring(0, 200)}...
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="memory-history">
+          <h3>📅 日摘要整理历史</h3>
+          <div className="history-list">
+            {dailyHistory.length === 0 ? (
+              <div className="empty-hint">暂无整理记录</div>
+            ) : (
+              dailyHistory.map((item, idx) => (
+                <div key={idx} className={`history-item ${item.status}`}>
+                  <div className="history-status">{getStatusIcon(item.status)}</div>
+                  <div className="history-content">
+                    <div className="history-date">{item.date}</div>
+                    <div className="history-info">
+                      {item.status === 'completed' ? `完成 (生成${item.memoryCount}条)` : 
+                       item.status === 'skipped' ? item.note || '去重跳过' : '失败'}
+                    </div>
+                  </div>
+                  <button 
+                    className="btn-link-small"
+                    onClick={() => handleRerun(item.date)}
                   >
-                    删除
+                    重跑
                   </button>
                 </div>
-                <div className="task-summary">{memory.content?.substring(0, 200)}...</div>
-                <div className="task-meta">
-                  <span>来源: {memory.sourceType}</span>
-                  {memory.taskId && <span>任务: {memory.taskId.substring(0, 8)}...</span>}
-                  <span>{new Date(memory.createdAt).toLocaleDateString()}</span>
-                </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
-        )}
+        </div>
       </div>
     </div>
   );
 }
+
+export default MemoryPage;

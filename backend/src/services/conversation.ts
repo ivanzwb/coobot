@@ -17,6 +17,11 @@ export interface CreateMessageOptions {
   taskId?: string;
   syncPolicy?: string;
   visibleClientIds?: string[];
+  attachments?: Array<{
+    type: string;
+    name: string;
+    url: string;
+  }>;
 }
 
 export class ConversationService {
@@ -90,7 +95,8 @@ export class ConversationService {
       syncPolicy: options.syncPolicy || 'synced_clients',
       visibleClientIds: options.visibleClientIds ? JSON.stringify(options.visibleClientIds) : null,
       role: options.role,
-      content: options.content
+      content: options.content,
+      attachments: options.attachments ? JSON.stringify(options.attachments) : null
     });
 
     await db.update(conversations)
