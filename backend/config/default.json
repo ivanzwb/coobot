@@ -1,0 +1,42 @@
+{
+  "server": {
+    "port": 3002,
+    "host": "localhost"
+  },
+  "database": {
+    "path": "./data/biosbot.db"
+  },
+  "vectorDb": {
+    "path": "./data/vectordb"
+  },
+  "workspace": {
+    "path": "./workspace"
+  },
+  "llm": {
+    "provider": "openai",
+    "apiKey": "",
+    "baseUrl": "https://api.openai.com/v1",
+    "defaultModel": "gpt-4",
+    "defaultTemperature": 0.7,
+    "timeout": 60000,
+    "maxRetries": 3
+  },
+  "scheduler": {
+    "scanIntervalMs": 5000,
+    "batchSize": 50,
+    "scanTimeoutMs": 60000,
+    "backoffMaxMs": 30000
+  },
+  "execution": {
+    "maxConcurrentTasks": 3,
+    "stepTimeoutMs": 300000,
+    "maxRetries": 3
+  },
+  "attachment": {
+    "maxSizeBytes": 52428800,
+    "allowedTypes": ["image/*", "application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain"]
+  },
+  "log": {
+    "level": "info"
+  }
+}
