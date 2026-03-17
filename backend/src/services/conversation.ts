@@ -2,6 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { db } from '../db/index.js';
 import { conversations, messages } from '../db/schema.js';
 import { eq, desc } from 'drizzle-orm';
+import { isRecordVisibleToClient, resolveVisibleClientIds } from './visibility.js';
+import { broadcastMessage } from '../websocket.js';
 
 export interface CreateConversationOptions {
   title?: string;
@@ -22,6 +24,25 @@ export interface CreateMessageOptions {
     name: string;
     url: string;
   }>;
+}
+
+function parseMessageAttachments(
+  attachments: string | Array<{ type: string; name: string; url: string }> | null | undefined
+) {
+  if (!attachments) {
+    return [];
+  }
+
+  if (Array.isArray(attachments)) {
+    return attachments;
+  }
+
+  try {
+    const parsed = JSON.parse(attachments);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 export class ConversationService {
@@ -76,7 +97,7 @@ export class ConversationService {
 
   async updateLatestTask(conversationId: string, taskId: string) {
     await db.update(conversations)
-      .set({ 
+      .set({
         latestTaskId: taskId,
         lastMessageAt: new Date(),
         updatedAt: new Date()
@@ -86,37 +107,66 @@ export class ConversationService {
 
   async createMessage(options: CreateMessageOptions) {
     const id = uuidv4();
+    const visibleClientIds = resolveVisibleClientIds(options.originClientId, options.visibleClientIds);
+    const createdAt = new Date();
+    const serializedAttachments = options.attachments ? JSON.stringify(options.attachments) : null;
+
     await db.insert(messages).values({
       id,
       conversationId: options.conversationId,
       taskId: options.taskId,
       entryPoint: options.entryPoint || 'web',
       originClientId: options.originClientId,
-      syncPolicy: options.syncPolicy || 'synced_clients',
-      visibleClientIds: options.visibleClientIds ? JSON.stringify(options.visibleClientIds) : null,
+      syncPolicy: options.syncPolicy || 'origin_only',
+      visibleClientIds: visibleClientIds.length > 0 ? JSON.stringify(visibleClientIds) : null,
       role: options.role,
       content: options.content,
-      attachments: options.attachments ? JSON.stringify(options.attachments) : null
+      attachments: serializedAttachments,
+      createdAt
     });
 
     await db.update(conversations)
-      .set({ 
+      .set({
         lastMessageAt: new Date(),
         updatedAt: new Date(),
         lastActiveClientId: options.originClientId
       })
       .where(eq(conversations.id, options.conversationId));
 
+    broadcastMessage(options.conversationId, {
+      id,
+      conversationId: options.conversationId,
+      taskId: options.taskId,
+      entryPoint: options.entryPoint || 'web',
+      originClientId: options.originClientId,
+      syncPolicy: options.syncPolicy || 'origin_only',
+      visibleClientIds,
+      role: options.role,
+      content: options.content,
+      attachments: parseMessageAttachments(serializedAttachments),
+      createdAt
+    });
+
     return id;
   }
 
   async getMessages(conversationId: string, limit = 100, offset = 0) {
-    return db.select()
+    const rows = await db.select()
       .from(messages)
       .where(eq(messages.conversationId, conversationId))
-      .orderBy(desc(messages.createdAt))
+      .orderBy(messages.createdAt)
       .limit(limit)
       .offset(offset);
+
+    return rows.map((message) => ({
+      ...message,
+      attachments: parseMessageAttachments(message.attachments)
+    }));
+  }
+
+  async getVisibleMessages(conversationId: string, clientId: string, limit = 100, offset = 0) {
+    const rows = await this.getMessages(conversationId, limit, offset);
+    return rows.filter((message) => isRecordVisibleToClient(message, clientId));
   }
 
   async deleteConversation(id: string) {

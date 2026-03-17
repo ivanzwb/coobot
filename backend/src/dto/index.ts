@@ -6,8 +6,6 @@ export interface CreateConversationDTO {
 
 export interface CreateMessageDTO {
   conversationId: string;
-  entryPoint: string;
-  originClientId: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   parentMessageId?: string;
@@ -15,11 +13,12 @@ export interface CreateMessageDTO {
 
 export interface CreateTaskDTO {
   conversationId?: string;
-  triggerMode: 'immediate' | 'wait' | 'confirm';
-  entryPoint: string;
-  originClientId: string;
+  triggerMode: 'immediate' | 'queued' | 'scheduled' | 'event_triggered' | 'clarification_pending';
   intakeInputSummary: string;
   input?: string;
+  triggerDecisionSummary?: string;
+  scheduledAt?: string;
+  triggerRule?: Record<string, any>;
 }
 
 export interface TaskFilterDTO {
@@ -120,7 +119,7 @@ export interface CancelTaskDTO {
 }
 
 export interface ConfirmTriggerDTO {
-  triggerMode: 'immediate' | 'wait' | 'confirm';
+  triggerMode: 'immediate' | 'queued' | 'scheduled' | 'event_triggered' | 'clarification_pending';
 }
 
 export interface ClarifyInputsDTO {
@@ -212,11 +211,15 @@ export interface TaskReportDTO {
   steps: any[];
   outputs: any[];
   events: any[];
+  references?: Array<{ title: string; summary?: string }>;
+  permissionDecisions?: any[];
+  stepSummaries?: any[];
   summary: {
     totalSteps: number;
     completedSteps: number;
     failedSteps: number;
     finalOutputReady: boolean;
+    terminalSummary?: string;
   };
 }
 

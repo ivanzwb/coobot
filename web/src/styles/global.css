@@ -484,6 +484,71 @@ body {
   line-height: 1.5;
 }
 
+.memory-source-panel {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  background: var(--gray-50);
+}
+
+.memory-source-error {
+  color: var(--error);
+}
+
+.memory-source-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.memory-source-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.memory-source-row-block {
+  flex-direction: column;
+  gap: 4px;
+}
+
+.memory-source-label {
+  min-width: 72px;
+  font-size: 12px;
+  color: var(--gray-500);
+}
+
+.memory-source-value {
+  font-size: 13px;
+  color: var(--gray-700);
+}
+
+.memory-source-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.memory-source-link {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--primary);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.memory-source-link:hover {
+  text-decoration: underline;
+}
+
+.memory-source-code {
+  font-family: monospace;
+  word-break: break-all;
+}
+
 .memory-history {
   background: white;
   border-radius: 8px;
@@ -2360,6 +2425,10 @@ body {
   margin-top: 8px;
   padding-top: 8px;
   border-top: 1px solid var(--gray-100);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .output-time {
@@ -2372,6 +2441,20 @@ body {
   gap: 12px;
   justify-content: center;
   padding: 24px;
+}
+
+.knowledge-compose-modal {
+  max-width: 720px;
+}
+
+.knowledge-compose-textarea {
+  min-height: 240px;
+  resize: vertical;
+}
+
+.btn-link[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Task List Page */

@@ -64,7 +64,7 @@ export function TaskDetail({ taskId: propTaskId }: TaskDetailProps) {
   const params = useParams<{ taskId: string }>();
   const taskId = propTaskId || params.taskId || '';
   const navigate = useNavigate();
-  const { currentTask, currentTaskSteps, currentTaskOutputs, currentTaskEvents, cancelTask, fetchTaskDetail } = useAppStore();
+  const { currentTask, currentTaskSteps, currentTaskOutputs, currentTaskEvents, cancelTask, retryTask, fetchTaskDetail } = useAppStore();
   const [activeTab, setActiveTab] = useState<'steps' | 'timeline' | 'outputs'>('steps');
 
   useEffect(() => {
@@ -77,6 +77,10 @@ export function TaskDetail({ taskId: propTaskId }: TaskDetailProps) {
     if (confirm('确定要取消这个任务吗?')) {
       await cancelTask(taskId);
     }
+  };
+
+  const handleRetry = async () => {
+    await retryTask(taskId);
   };
 
   const task = currentTask;
@@ -92,9 +96,9 @@ export function TaskDetail({ taskId: propTaskId }: TaskDetailProps) {
         </div>
         <div className="header-actions">
           {task?.status === 'failed' && (
-            <button className="btn btn-primary">重试</button>
+            <button className="btn btn-primary" onClick={handleRetry}>重试</button>
           )}
-          {(task?.status === 'pending' || task?.status === 'running' || 
+          {(task?.status === 'pending' || task?.status === 'running' ||
             task?.status === 'queued' || task?.status === 'TaskPending' ||
             task?.status === 'TaskExecuting' || task?.status === 'TaskQueued') && (
             <button className="btn btn-danger" onClick={handleCancel}>取消任务</button>
@@ -103,32 +107,32 @@ export function TaskDetail({ taskId: propTaskId }: TaskDetailProps) {
       </div>
 
       <TaskOverviewSection task={task} />
-      
+
       {(task?.complexityDecisionSummary || task?.arrangementStatus === 'TaskArrangementCompleted') && (
-        <TaskHierarchySection 
+        <TaskHierarchySection
           task={task}
           subTasks={task?.subTasks || []}
         />
       )}
-      
+
       {(task?.waitingAnomalySummary || task?.interventionRequiredReason) && (
-        <TaskWaitingAnomalySection 
+        <TaskWaitingAnomalySection
           anomalySummary={task?.waitingAnomalySummary}
           interventionReason={task?.interventionRequiredReason}
           thresholdBasis={task?.waitingThresholdBasis}
         />
       )}
-      
+
       {task?.reassessmentRequired && (
-        <TaskReassessmentSection 
+        <TaskReassessmentSection
           reassessmentType={task?.reassessmentType}
           previousValue={task?.previousMarkerValue}
           newValue={task?.newMarkerValue}
         />
       )}
-      
-      <TaskStepsSection 
-        steps={currentTaskSteps} 
+
+      <TaskStepsSection
+        steps={currentTaskSteps}
         activeTab={activeTab}
         onTabChange={setActiveTab}
       />
@@ -138,7 +142,7 @@ export function TaskDetail({ taskId: propTaskId }: TaskDetailProps) {
       {currentTaskOutputs.length > 0 && (
         <TaskOutputSection outputs={currentTaskOutputs} />
       )}
-      
+
       {task?.notifications && task.notifications.length > 0 && (
         <TaskNotificationSection notifications={task.notifications} />
       )}
@@ -182,7 +186,7 @@ function TaskOverviewSection({ task }: { task?: any }) {
             <span className="overview-value">{task.triggerMode}</span>
           </div>
         </div>
-        
+
         <div className="overview-row">
           <div className="overview-item full-width">
             <span className="overview-label">入口判定</span>
@@ -214,7 +218,7 @@ function TaskOverviewSection({ task }: { task?: any }) {
             </div>
           )}
         </div>
-        
+
         {task.arrangementEta && (
           <div className="overview-row eta-row">
             <span className="overview-label">📊 ETA</span>
@@ -338,12 +342,12 @@ function TaskReassessmentSection({ reassessmentType, previousValue, newValue }: 
   );
 }
 
-function TaskStepsSection({ 
-  steps, 
-  activeTab, 
-  onTabChange 
-}: { 
-  steps: any[]; 
+function TaskStepsSection({
+  steps,
+  activeTab,
+  onTabChange
+}: {
+  steps: any[];
   activeTab: string;
   onTabChange: (tab: 'steps' | 'timeline' | 'outputs') => void;
 }) {
@@ -352,19 +356,19 @@ function TaskStepsSection({
       <div className="section-header">
         <h3>📋 步骤进度</h3>
         <div className="tabs">
-          <button 
+          <button
             className={`tab ${activeTab === 'steps' ? 'active' : ''}`}
             onClick={() => onTabChange('steps')}
           >
             步骤
           </button>
-          <button 
+          <button
             className={`tab ${activeTab === 'timeline' ? 'active' : ''}`}
             onClick={() => onTabChange('timeline')}
           >
             时间线
           </button>
-          <button 
+          <button
             className={`tab ${activeTab === 'outputs' ? 'active' : ''}`}
             onClick={() => onTabChange('outputs')}
           >
@@ -379,8 +383,8 @@ function TaskStepsSection({
             {steps.map((step, index) => (
               <div key={step.id} className={`progress-step ${step.status}`}>
                 <div className="step-dot">
-                  {step.status === 'TaskStepCompleted' || step.status === 'completed' ? '✓' : 
-                   step.status === 'TaskStepRunning' || step.status === 'running' ? '●' : 
+                  {step.status === 'TaskStepCompleted' || step.status === 'completed' ? '✓' :
+                   step.status === 'TaskStepRunning' || step.status === 'running' ? '●' :
                    step.status === 'TaskStepFailed' || step.status === 'failed' ? '✕' : index + 1}
                 </div>
                 {index < steps.length - 1 && <div className="step-connector"></div>}
@@ -399,8 +403,8 @@ function TaskStepsSection({
           steps.map((step) => (
             <div key={step.id} className={`step-item ${step.status}`}>
               <div className="step-icon">
-                {step.status === 'TaskStepCompleted' || step.status === 'completed' ? '✓' : 
-                 step.status === 'TaskStepRunning' || step.status === 'running' ? '●' : 
+                {step.status === 'TaskStepCompleted' || step.status === 'completed' ? '✓' :
+                 step.status === 'TaskStepRunning' || step.status === 'running' ? '●' :
                  step.status === 'TaskStepFailed' || step.status === 'failed' ? '✕' : step.stepOrder}
               </div>
               <div className="step-info">
@@ -495,7 +499,7 @@ function TaskNotificationSection({ notifications }: TaskNotificationSectionProps
         {notifications.map((notification, idx) => (
           <div key={idx} className={`notification-item ${notification.stage}`}>
             <div className="notification-stage">
-              {notification.stage === 'TaskArrangementCompleted' ? '📋 已安排完成' : 
+              {notification.stage === 'TaskArrangementCompleted' ? '📋 已安排完成' :
                notification.stage === 'TaskCompleted' ? '✅ 最终完成' : notification.stage}
             </div>
             <div className="notification-time">

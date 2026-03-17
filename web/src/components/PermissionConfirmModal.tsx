@@ -10,6 +10,16 @@ interface PermissionRequest {
   description?: string;
   status: string;
   createdAt: string;
+  initiatingAgentId?: string | null;
+  initiatingSkillId?: string | null;
+  toolName?: string | null;
+  policySourceSummary?: string;
+  trace?: Array<{
+    layer: string;
+    decision: string;
+    policyName?: string | null;
+    reason?: string | null;
+  }>;
 }
 
 interface PermissionConfirmModalProps {
@@ -77,7 +87,7 @@ export function PermissionConfirmModal({ request, onApprove, onDeny, onClose }: 
           <span style={{ color: '#f59e0b' }}>⚠️</span>
           <span style={{ marginLeft: 8 }}>权限确认请求</span>
         </div>
-        
+
         <div className="modal-body">
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 14, color: '#6b7280', marginBottom: 4 }}>
@@ -108,6 +118,45 @@ export function PermissionConfirmModal({ request, onApprove, onDeny, onClose }: 
             </div>
           )}
 
+          {(request.initiatingAgentId || request.initiatingSkillId || request.toolName) && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 14, color: '#6b7280', marginBottom: 4 }}>
+                发起上下文
+              </div>
+              <div style={{ fontSize: 14, lineHeight: 1.6 }}>
+                {request.initiatingAgentId && <div>Agent: {request.initiatingAgentId}</div>}
+                {request.initiatingSkillId && <div>Skill: {request.initiatingSkillId}</div>}
+                {request.toolName && <div>Tool: {request.toolName}</div>}
+              </div>
+            </div>
+          )}
+
+          {request.policySourceSummary && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 14, color: '#6b7280', marginBottom: 4 }}>
+                策略来源
+              </div>
+              <div style={{ fontSize: 14 }}>{request.policySourceSummary}</div>
+            </div>
+          )}
+
+          {request.trace && request.trace.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 14, color: '#6b7280', marginBottom: 4 }}>
+                决策轨迹
+              </div>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {request.trace.map((entry, index) => (
+                  <div key={`${entry.layer}-${index}`} style={{ padding: 8, borderRadius: 6, background: '#f9fafb', fontSize: 12 }}>
+                    <div>{entry.layer}{entry.policyName ? ` / ${entry.policyName}` : ''}</div>
+                    <div>决策: {entry.decision}</div>
+                    {entry.reason && <div>说明: {entry.reason}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div style={{ padding: 12, background: '#fef3c7', borderRadius: 8, fontSize: 12, color: '#92400e' }}>
             ⚠️ 此操作可能对系统产生影响，请在确认安全后授权
           </div>
@@ -118,15 +167,15 @@ export function PermissionConfirmModal({ request, onApprove, onDeny, onClose }: 
         </div>
 
         <div className="modal-footer">
-          <button 
-            className="btn btn-secondary" 
+          <button
+            className="btn btn-secondary"
             onClick={handleDeny}
             disabled={loading || countdown === 0}
           >
             拒绝
           </button>
-          <button 
-            className="btn btn-primary" 
+          <button
+            className="btn btn-primary"
             onClick={handleApprove}
             disabled={loading || countdown === 0}
           >
@@ -144,26 +193,31 @@ export function PermissionPanel() {
 
   useEffect(() => {
     loadPermissions();
+
+    const timer = window.setInterval(() => {
+      loadPermissions();
+    }, 5000);
+
+    return () => window.clearInterval(timer);
   }, []);
 
   const loadPermissions = async () => {
     setLoading(true);
     try {
-      // Would need an API endpoint for this
-      // const data = await api.getPendingPermissions();
-      // setPermissions(data);
+      const data = await api.getPendingPermissions();
+      setPermissions(data as PermissionRequest[]);
     } finally {
       setLoading(false);
     }
   };
 
   const handleApprove = async (id: string) => {
-    await api.grantPermission(id);
+    await api.approvePermissionRequest(id);
     setPermissions(prev => prev.filter(p => p.id !== id));
   };
 
   const handleDeny = async (id: string) => {
-    await api.denyPermission(id);
+    await api.rejectPermissionRequest(id);
     setPermissions(prev => prev.filter(p => p.id !== id));
   };
 

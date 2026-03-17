@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useAppStore, Message, Task, TaskStep } from '../stores/appStore';
+import { useNavigate, useParams } from 'react-router-dom';
+import { useAppStore, Message, PendingAttachment, Task, TaskStep } from '../stores/appStore';
 import { format } from 'date-fns';
 
 interface Attachment {
@@ -9,14 +9,22 @@ interface Attachment {
   name: string;
   url: string;
   preview?: string;
+  file?: File;
 }
 
 export function ChatArea() {
   const [input, setInput] = useState('');
-  const [attachments, setAttachments] = useState<Array<{ type: string; name: string; url: string }>>([]);
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
-  const { messages, isLoading, sendMessage, currentTask, tasks, currentTaskSteps } = useAppStore();
+  const params = useParams<{ conversationId: string }>();
+  const { messages, isLoading, sendMessage, currentTask, tasks, currentTaskSteps, cancelTask, retryTask, conversationId, switchConversation } = useAppStore();
+
+  useEffect(() => {
+    if (params.conversationId && params.conversationId !== conversationId) {
+      void switchConversation(params.conversationId);
+    }
+  }, [params.conversationId, conversationId, switchConversation]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -35,28 +43,41 @@ export function ChatArea() {
   };
 
   const latestTask = tasks.find(t => t.id === currentTask?.id);
+  const handleCancelTask = async (taskId: string) => {
+    if (window.confirm('确定要取消这个任务吗?')) {
+      await cancelTask(taskId);
+    }
+  };
+
+  const handleRetryTask = async (taskId: string) => {
+    await retryTask(taskId);
+  };
 
   return (
     <div className="chat-page">
       {latestTask && (
-        <ConversationTaskStatusBar 
-          task={latestTask} 
+        <ConversationTaskStatusBar
+          task={latestTask}
           steps={currentTaskSteps}
+          onRetryTask={handleRetryTask}
+          onCancelTask={handleCancelTask}
           onViewTask={(id) => navigate(`/tasks/${id}`)}
           onViewResult={(id) => navigate(`/results/${id}`)}
         />
       )}
-      
-      <ConversationMessagePanel 
+
+      <ConversationMessagePanel
         messages={messages}
         tasks={tasks}
         isLoading={isLoading}
         messagesEndRef={messagesEndRef}
+        onRetryTask={handleRetryTask}
+        onCancelTask={handleCancelTask}
         onViewTask={(id) => navigate(`/tasks/${id}`)}
         onViewResult={(id) => navigate(`/results/${id}`)}
       />
-      
-      <ConversationComposer 
+
+      <ConversationComposer
         input={input}
         attachments={attachments}
         onChange={setInput}
@@ -73,17 +94,21 @@ interface ConversationMessagePanelProps {
   tasks: Task[];
   isLoading: boolean;
   messagesEndRef: React.RefObject<HTMLDivElement>;
+  onRetryTask: (taskId: string) => void;
+  onCancelTask: (taskId: string) => void;
   onViewTask: (taskId: string) => void;
   onViewResult: (taskId: string) => void;
 }
 
-export function ConversationMessagePanel({ 
-  messages, 
-  tasks, 
-  isLoading, 
+export function ConversationMessagePanel({
+  messages,
+  tasks,
+  isLoading,
   messagesEndRef,
+  onRetryTask,
+  onCancelTask,
   onViewTask,
-  onViewResult 
+  onViewResult
 }: ConversationMessagePanelProps) {
   const renderTaskCard = (task: Task) => {
     if (task.complexityDecisionSummary) {
@@ -95,6 +120,9 @@ export function ConversationMessagePanel({
             <div className="card-summary">{task.complexityDecisionSummary}</div>
             <button className="btn-link" onClick={() => onViewTask(task.id)}>
               查看详情
+            </button>
+            <button className="btn-link" onClick={() => onCancelTask(task.id)}>
+              取消任务
             </button>
           </div>
         </div>
@@ -152,6 +180,9 @@ export function ConversationMessagePanel({
               <button className="btn-secondary" onClick={() => onViewTask(task.id)}>
                 查看详情
               </button>
+              <button className="btn-secondary" onClick={() => onRetryTask(task.id)}>
+                重试任务
+              </button>
               <button className="btn-primary" onClick={() => onViewResult(task.id)}>
                 查看结果摘要
               </button>
@@ -187,7 +218,7 @@ export function ConversationMessagePanel({
                     <div className="message-attachments">
                       {msg.attachments.map((att, idx) => (
                         <div key={idx} className="message-attachment">
-                          {att.type === 'image' ? (
+                          {att.type === 'image' && (att.url.startsWith('data:') || att.url.startsWith('blob:') || att.url.startsWith('http')) ? (
                             <img src={att.url} alt={att.id} className="attachment-img" />
                           ) : (
                             <div className="attachment-file">
@@ -205,10 +236,10 @@ export function ConversationMessagePanel({
                 </div>
               </div>
             ))}
-            
-            {tasks.filter(t => t.complexityDecisionSummary || 
-              t.arrangementStatus === 'TaskArrangementCompleted' || 
-              t.status === 'running' || 
+
+            {tasks.filter(t => t.complexityDecisionSummary ||
+              t.arrangementStatus === 'TaskArrangementCompleted' ||
+              t.status === 'running' ||
               t.status === 'TaskExecuting' ||
               t.status === 'failed'
             ).map((task) => (
@@ -232,27 +263,27 @@ export function ConversationMessagePanel({
 
 interface ConversationComposerProps {
   input: string;
-  attachments: Array<{ type: string; name: string; url: string }>;
+  attachments: PendingAttachment[];
   onChange: (value: string) => void;
-  onAttachmentsChange: (attachments: Array<{ type: string; name: string; url: string }>) => void;
+  onAttachmentsChange: (attachments: PendingAttachment[]) => void;
   onSubmit: (e: React.FormEvent) => void;
   isLoading: boolean;
 }
 
-export function ConversationComposer({ 
-  input, 
+export function ConversationComposer({
+  input,
   attachments: propAttachments,
-  onChange, 
+  onChange,
   onAttachmentsChange,
-  onSubmit, 
-  isLoading 
+  onSubmit,
+  isLoading
 }: ConversationComposerProps) {
   const [localAttachments, setLocalAttachments] = useState<Attachment[]>(
-    (propAttachments || []).map(a => ({ 
-      ...a, 
-      id: a.name, 
+    (propAttachments || []).map(a => ({
+      ...a,
+      id: a.name,
       type: (a.type === 'image' ? 'image' : 'file') as 'image' | 'file',
-      preview: a.type === 'image' ? a.url : undefined 
+      preview: a.type === 'image' ? a.url : undefined
     }))
   );
   const [isDragging, setIsDragging] = useState(false);
@@ -270,7 +301,7 @@ export function ConversationComposer({
     }
   }, [propAttachments]);
 
-  const attachments = propAttachments.length > 0 
+  const attachments = propAttachments.length > 0
     ? propAttachments.map(a => ({ ...a, id: a.name, preview: a.type === 'image' ? a.url : undefined }))
     : localAttachments;
 
@@ -283,9 +314,9 @@ export function ConversationComposer({
 
   const handleFileSelect = (files: FileList | null) => {
     if (!files) return;
-    
+
     const newAttachments: Attachment[] = [];
-    
+
     Array.from(files).forEach((file) => {
       const isImage = file.type.startsWith('image/');
       const attachment: Attachment = {
@@ -293,14 +324,15 @@ export function ConversationComposer({
         type: isImage ? 'image' : 'file',
         name: file.name,
         url: URL.createObjectURL(file),
-        preview: isImage ? URL.createObjectURL(file) : undefined
+        preview: isImage ? URL.createObjectURL(file) : undefined,
+        file
       };
       newAttachments.push(attachment);
     });
-    
+
     const newAtts = [...localAttachments, ...newAttachments];
     setLocalAttachments(newAtts);
-    onAttachmentsChange(newAtts.map(a => ({ type: a.type, name: a.name, url: a.url })));
+    onAttachmentsChange(newAtts.map(a => ({ type: a.type, name: a.name, url: a.url, file: a.file })));
   };
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -320,7 +352,7 @@ export function ConversationComposer({
   const handleRemoveAttachment = (id: string) => {
     const newLocal = localAttachments.filter(a => a.id !== id);
     setLocalAttachments(newLocal);
-    onAttachmentsChange(newLocal.map(a => ({ type: a.type, name: a.name, url: a.url })));
+    onAttachmentsChange(newLocal.map(a => ({ type: a.type, name: a.name, url: a.url, file: a.file })));
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -342,14 +374,14 @@ export function ConversationComposer({
   const handlePaste = (e: React.ClipboardEvent) => {
     const items = e.clipboardData.items;
     const files: File[] = [];
-    
+
     for (let i = 0; i < items.length; i++) {
       if (items[i].type.indexOf('image') !== -1) {
         const file = items[i].getAsFile();
         if (file) files.push(file);
       }
     }
-    
+
     if (files.length > 0) {
       const dataTransfer = new DataTransfer();
       files.forEach(f => dataTransfer.items.add(f));
@@ -361,7 +393,7 @@ export function ConversationComposer({
 
   const handleSubmit = (e: React.FormEvent) => {
     if (!canSubmit) return;
-    
+
     const formData = new FormData();
     formData.append('message', input);
     attachments.forEach(att => {
@@ -371,12 +403,12 @@ export function ConversationComposer({
         formData.append('files', att.url);
       }
     });
-    
+
     onSubmit(e);
   };
 
   return (
-    <div 
+    <div
       className={`composer ${isDragging ? 'dragging' : ''}`}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -390,7 +422,7 @@ export function ConversationComposer({
           </div>
         </div>
       )}
-      
+
       {attachments.length > 0 && (
         <div className="attachment-preview-list">
           {attachments.map((att) => (
@@ -403,8 +435,8 @@ export function ConversationComposer({
                   <span className="file-name">{att.name}</span>
                 </div>
               )}
-              <button 
-                type="button" 
+              <button
+                type="button"
                 className="attachment-remove"
                 onClick={() => handleRemoveAttachment(att.id)}
               >
@@ -414,35 +446,35 @@ export function ConversationComposer({
           ))}
         </div>
       )}
-      
+
       <form onSubmit={handleSubmit}>
         <div className="composer-input-wrapper">
           <div className="attachment-buttons">
-            <button 
-              type="button" 
-              className="btn-attachment" 
+            <button
+              type="button"
+              className="btn-attachment"
               title="上传图片"
               onClick={() => imageInputRef.current?.click()}
             >
               📷
             </button>
-            <button 
-              type="button" 
-              className="btn-attachment" 
+            <button
+              type="button"
+              className="btn-attachment"
               title="上传附件"
               onClick={() => fileInputRef.current?.click()}
             >
               📎
             </button>
-            <button 
-              type="button" 
-              className="btn-attachment" 
+            <button
+              type="button"
+              className="btn-attachment"
               title="更多"
               onClick={() => setShowAttachmentMenu(!showAttachmentMenu)}
             >
               ➕
             </button>
-            
+
             <input
               ref={imageInputRef}
               type="file"
@@ -460,7 +492,7 @@ export function ConversationComposer({
               style={{ display: 'none' }}
             />
           </div>
-          
+
           <textarea
             value={input}
             onChange={(e) => onChange(e.target.value)}
@@ -470,8 +502,8 @@ export function ConversationComposer({
             onPaste={handlePaste}
             rows={1}
           />
-          <button 
-            type="submit" 
+          <button
+            type="submit"
             className="btn-send"
             disabled={!canSubmit}
           >
@@ -486,11 +518,13 @@ export function ConversationComposer({
 interface ConversationTaskStatusBarProps {
   task: Task;
   steps: TaskStep[];
+  onRetryTask: (taskId: string) => void;
+  onCancelTask: (taskId: string) => void;
   onViewTask: (taskId: string) => void;
   onViewResult: (taskId: string) => void;
 }
 
-export function ConversationTaskStatusBar({ task, steps, onViewTask, onViewResult }: ConversationTaskStatusBarProps) {
+export function ConversationTaskStatusBar({ task, steps, onRetryTask, onCancelTask, onViewTask, onViewResult }: ConversationTaskStatusBarProps) {
   const getStatusLabel = (status: string) => {
     const labels: Record<string, string> = {
       pending: '等待中',
@@ -568,6 +602,9 @@ export function ConversationTaskStatusBar({ task, steps, onViewTask, onViewResul
           <button className="btn-link" onClick={() => onViewTask(task.id)}>
             查看详情
           </button>
+          <button className="btn-link" onClick={() => onCancelTask(task.id)}>
+            取消任务
+          </button>
         </div>
       </div>
     );
@@ -585,6 +622,9 @@ export function ConversationTaskStatusBar({ task, steps, onViewTask, onViewResul
         <div className="status-actions">
           <button className="btn-link" onClick={() => onViewTask(task.id)}>
             查看详情
+          </button>
+          <button className="btn-link" onClick={() => onRetryTask(task.id)}>
+            重试任务
           </button>
           <button className="btn-link" onClick={() => onViewResult(task.id)}>
             查看结果摘要
@@ -609,6 +649,38 @@ export function ConversationTaskStatusBar({ task, steps, onViewTask, onViewResul
         <div className="status-actions">
           <button className="btn-link" onClick={() => onViewTask(task.id)}>
             查看详情
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (
+    task.status === 'pending' ||
+    task.status === 'TaskPending' ||
+    task.status === 'queued' ||
+    task.status === 'TaskQueued' ||
+    task.status === 'clarification_pending' ||
+    task.status === 'scheduled' ||
+    task.status === 'event_triggered'
+  ) {
+    return (
+      <div className="task-status-bar pending">
+        <div className="status-info">
+          <span className={`status-badge ${getStatusClass(task.status)}`}>
+            {getStatusLabel(task.status)}
+          </span>
+          <span className="task-id">#{task.id?.slice(0, 12)}</span>
+        </div>
+        <div className="status-summary">
+          {task.triggerDecisionSummary || task.intakeInputSummary || '任务等待执行或补充条件'}
+        </div>
+        <div className="status-actions">
+          <button className="btn-link" onClick={() => onViewTask(task.id)}>
+            查看详情
+          </button>
+          <button className="btn-link" onClick={() => onCancelTask(task.id)}>
+            取消任务
           </button>
         </div>
       </div>

@@ -1,10 +1,11 @@
 import { db } from '../db/index.js';
 import { agents, skills, permissionPolicies, systemConfigs } from '../db/schema.js';
 import { v4 as uuidv4 } from 'uuid';
+import { pathToFileURL } from 'node:url';
 
 export async function initializeDatabase() {
   console.log('[Init] Starting database initialization...');
-  
+
   const existingAgents = await db.select().from(agents).limit(1);
   if (existingAgents.length > 0) {
     console.log('[Init] Database already initialized');
@@ -150,12 +151,18 @@ export async function initializeDatabase() {
   console.log(`[Init] Created ${defaultConfigs.length} system configs`);
 }
 
-initializeDatabase()
-  .then(() => {
-    console.log('[Init] Initialization complete');
-    process.exit(0);
-  })
-  .catch((error) => {
-    console.error('[Init] Initialization failed:', error);
-    process.exit(1);
-  });
+const isDirectExecution = process.argv[1]
+  ? import.meta.url === pathToFileURL(process.argv[1]).href
+  : false;
+
+if (isDirectExecution) {
+  initializeDatabase()
+    .then(() => {
+      console.log('[Init] Initialization complete');
+      process.exit(0);
+    })
+    .catch((error) => {
+      console.error('[Init] Initialization failed:', error);
+      process.exit(1);
+    });
+}

@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import { useAppStore } from '../stores/appStore';
 
 interface Memory {
   id: string;
@@ -29,13 +31,33 @@ interface DailyConsolidation {
   note?: string;
 }
 
+interface MemorySourceDetail {
+  memoryEntryId: string;
+  sourceType: string;
+  summaryDate?: string;
+  sourceConversationIds: string[];
+  sourceTaskId?: string | null;
+  sourceAttachmentIds: string[];
+  dedupKey?: string | null;
+  jobId?: string | null;
+  summaryVersion?: string | null;
+}
+
 export function MemoryPage() {
   const [memories, setMemories] = useState<Memory[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [dailyHistory, setDailyHistory] = useState<DailyConsolidation[]>([]);
   const [loading, setLoading] = useState(true);
+  const [consolidating, setConsolidating] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [expandedSourceId, setExpandedSourceId] = useState<string | null>(null);
+  const [sourceLoadingId, setSourceLoadingId] = useState<string | null>(null);
+  const [memorySources, setMemorySources] = useState<Record<string, MemorySourceDetail>>({});
+  const [sourceErrors, setSourceErrors] = useState<Record<string, string>>({});
+  const navigate = useNavigate();
+  const initApp = useAppStore((state) => state.init);
+  const conversationId = useAppStore((state) => state.conversationId);
 
   useEffect(() => {
     loadAgents();
@@ -44,6 +66,7 @@ export function MemoryPage() {
 
   useEffect(() => {
     loadMemories();
+    loadDailyHistory(selectedAgentId || undefined);
   }, [selectedAgentId]);
 
   const loadAgents = async () => {
@@ -67,9 +90,9 @@ export function MemoryPage() {
     }
   };
 
-  const loadDailyHistory = async () => {
+  const loadDailyHistory = async (agentId?: string) => {
     try {
-      const data = await api.getDailyConsolidationHistory();
+      const data = await api.getDailyConsolidationHistory(agentId);
       setDailyHistory(data as DailyConsolidation[]);
     } catch (error) {
       console.error('Failed to load daily history:', error);
@@ -86,23 +109,87 @@ export function MemoryPage() {
     }
   };
 
-  const handleRerun = async (date: string) => {
-    if (!confirm(`确定要重新整理 ${date} 的记忆吗?`)) return;
+  const handleToggleSource = async (memoryId: string) => {
+    if (expandedSourceId === memoryId) {
+      setExpandedSourceId(null);
+      return;
+    }
+
+    setExpandedSourceId(memoryId);
+
+    if (memorySources[memoryId] || sourceLoadingId === memoryId) {
+      return;
+    }
+
     try {
-      await api.runDailyConsolidation(selectedAgentId || undefined);
-      loadDailyHistory();
-    } catch (error) {
-      console.error('Failed to rerun:', error);
+      setSourceLoadingId(memoryId);
+      const source = await api.getMemoryEntrySource(memoryId) as MemorySourceDetail;
+      setMemorySources((current) => ({
+        ...current,
+        [memoryId]: source
+      }));
+      setSourceErrors((current) => {
+        const next = { ...current };
+        delete next[memoryId];
+        return next;
+      });
+    } catch (error: any) {
+      setSourceErrors((current) => ({
+        ...current,
+        [memoryId]: error.message || '加载来源失败'
+      }));
+    } finally {
+      setSourceLoadingId(null);
     }
   };
 
-  const getTypeLabel = (type: string) => {
-    const labels: Record<string, string> = {
-      'short_term': '短期记忆',
-      'agent': 'Agent记忆',
-      'persistent': '持久记忆'
-    };
-    return labels[type] || type;
+  const handleRerun = async (date: string) => {
+    if (!confirm(`确定要重新整理 ${date} 的记忆吗?`)) return;
+    try {
+      setConsolidating(true);
+      await api.runDailyConsolidation(selectedAgentId || undefined, date);
+      await Promise.all([
+        loadMemories(),
+        loadDailyHistory(selectedAgentId || undefined)
+      ]);
+    } catch (error) {
+      console.error('Failed to rerun:', error);
+    } finally {
+      setConsolidating(false);
+    }
+  };
+
+  const handleOpenTask = (taskId: string) => {
+    navigate(`/tasks/${taskId}`);
+  };
+
+  const handleOpenConversation = async (_targetConversationId: string) => {
+    if (!conversationId) {
+      await initApp();
+    }
+
+    navigate(`/chat/${_targetConversationId}`);
+  };
+
+  const handleManualConsolidation = async () => {
+    try {
+      setConsolidating(true);
+      const result = await api.runDailyConsolidation(selectedAgentId || undefined) as {
+        totalConversations?: number;
+        totalMessages?: number;
+        memoriesCreated?: number;
+        summary?: string;
+      };
+      await Promise.all([
+        loadMemories(),
+        loadDailyHistory(selectedAgentId || undefined)
+      ]);
+      alert(result.summary || '手动整理已完成');
+    } catch (error) {
+      console.error('Failed to consolidate memories:', error);
+    } finally {
+      setConsolidating(false);
+    }
   };
 
   const getImportanceLabel = (importance: string) => {
@@ -124,7 +211,7 @@ export function MemoryPage() {
   };
 
   const filteredMemories = memories.filter(m => {
-    if (searchQuery && !m.summary?.toLowerCase().includes(searchQuery.toLowerCase()) && 
+    if (searchQuery && !m.summary?.toLowerCase().includes(searchQuery.toLowerCase()) &&
         !m.content?.toLowerCase().includes(searchQuery.toLowerCase())) {
       return false;
     }
@@ -135,7 +222,10 @@ export function MemoryPage() {
     <div className="memory-page">
       <div className="page-header">
         <h2>记忆管理</h2>
-        <button className="btn btn-secondary" onClick={loadMemories}>
+        <button className="btn btn-secondary" onClick={() => {
+          loadMemories();
+          loadDailyHistory(selectedAgentId || undefined);
+        }}>
           🔄 刷新
         </button>
       </div>
@@ -145,7 +235,7 @@ export function MemoryPage() {
           <div className="sidebar-section">
             <h3>Agent 选择</h3>
             <div className="agent-list">
-              <button 
+              <button
                 className={`agent-item ${selectedAgentId === '' ? 'active' : ''}`}
                 onClick={() => setSelectedAgentId('')}
               >
@@ -174,8 +264,8 @@ export function MemoryPage() {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
-            <button className="btn btn-primary">
-              手动整理
+            <button className="btn btn-primary" onClick={handleManualConsolidation} disabled={consolidating}>
+              {consolidating ? '整理中...' : '手动整理'}
             </button>
           </div>
 
@@ -200,8 +290,10 @@ export function MemoryPage() {
                       {memory.summary || '记忆'}
                     </div>
                     <div className="memory-actions">
-                      <button className="btn-link">来源</button>
-                      <button 
+                      <button className="btn-link" onClick={() => handleToggleSource(memory.id)}>
+                        {expandedSourceId === memory.id ? '收起来源' : '来源'}
+                      </button>
+                      <button
                         className="btn-danger-small"
                         onClick={() => handleDelete(memory.id)}
                       >
@@ -210,9 +302,8 @@ export function MemoryPage() {
                     </div>
                   </div>
                   <div className="memory-meta">
-                    <span className="badge badge-info">{getTypeLabel(memory.type)}</span>
                     <span className={`badge ${
-                      memory.importance === 'high' ? 'badge-error' : 
+                      memory.importance === 'high' ? 'badge-error' :
                       memory.importance === 'medium' ? 'badge-warning' : 'badge-success'
                     }`}>
                       {getImportanceLabel(memory.importance)}
@@ -225,6 +316,15 @@ export function MemoryPage() {
                   <div className="memory-content">
                     {memory.content?.substring(0, 200)}...
                   </div>
+                  {expandedSourceId === memory.id && (
+                    <MemorySourcePanel
+                      source={memorySources[memory.id]}
+                      loading={sourceLoadingId === memory.id}
+                      error={sourceErrors[memory.id]}
+                      onOpenTask={handleOpenTask}
+                      onOpenConversation={handleOpenConversation}
+                    />
+                  )}
                 </div>
               ))}
             </div>
@@ -243,21 +343,103 @@ export function MemoryPage() {
                   <div className="history-content">
                     <div className="history-date">{item.date}</div>
                     <div className="history-info">
-                      {item.status === 'completed' ? `完成 (生成${item.memoryCount}条)` : 
+                      {item.status === 'completed' ? `完成 (生成${item.memoryCount}条)` :
                        item.status === 'skipped' ? item.note || '去重跳过' : '失败'}
                     </div>
                   </div>
-                  <button 
+                  <button
                     className="btn-link-small"
+                    disabled={consolidating}
                     onClick={() => handleRerun(item.date)}
                   >
-                    重跑
+                    {consolidating ? '处理中...' : '重跑'}
                   </button>
                 </div>
               ))
             )}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function MemorySourcePanel({
+  source,
+  loading,
+  error,
+  onOpenTask,
+  onOpenConversation
+}: {
+  source?: MemorySourceDetail;
+  loading: boolean;
+  error?: string;
+  onOpenTask: (taskId: string) => void;
+  onOpenConversation: (conversationId: string) => void | Promise<void>;
+}) {
+  if (loading) {
+    return <div className="memory-source-panel">正在加载来源详情...</div>;
+  }
+
+  if (error) {
+    return <div className="memory-source-panel memory-source-error">{error}</div>;
+  }
+
+  if (!source) {
+    return null;
+  }
+
+  return (
+    <div className="memory-source-panel">
+      <div className="memory-source-grid">
+        <div className="memory-source-row">
+          <span className="memory-source-label">来源类型</span>
+          <span className="memory-source-value">{source.sourceType}</span>
+        </div>
+        {source.summaryDate && (
+          <div className="memory-source-row">
+            <span className="memory-source-label">摘要日期</span>
+            <span className="memory-source-value">{source.summaryDate}</span>
+          </div>
+        )}
+        {source.sourceTaskId && (
+          <div className="memory-source-row">
+            <span className="memory-source-label">来源任务</span>
+            <button className="memory-source-link" onClick={() => onOpenTask(source.sourceTaskId || '')}>
+              {source.sourceTaskId}
+            </button>
+          </div>
+        )}
+        {source.sourceConversationIds.length > 0 && (
+          <div className="memory-source-row">
+            <span className="memory-source-label">来源会话</span>
+            <div className="memory-source-links">
+              {source.sourceConversationIds.map((conversationId) => (
+                <button key={conversationId} className="memory-source-link" onClick={() => onOpenConversation(conversationId)}>
+                  {conversationId}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {source.jobId && (
+          <div className="memory-source-row">
+            <span className="memory-source-label">整理作业</span>
+            <span className="memory-source-value">{source.jobId}</span>
+          </div>
+        )}
+        {source.summaryVersion && (
+          <div className="memory-source-row">
+            <span className="memory-source-label">摘要版本</span>
+            <span className="memory-source-value">{source.summaryVersion}</span>
+          </div>
+        )}
+        {source.dedupKey && (
+          <div className="memory-source-row memory-source-row-block">
+            <span className="memory-source-label">去重键</span>
+            <span className="memory-source-value memory-source-code">{source.dedupKey}</span>
+          </div>
+        )}
       </div>
     </div>
   );

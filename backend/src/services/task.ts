@@ -3,6 +3,8 @@ import { db } from '../db/index.js';
 import { tasks, taskEvents, taskSteps, taskOutputs, waitSubscriptions } from '../db/schema.js';
 import { eq, and, gt, asc, desc } from 'drizzle-orm';
 import { TaskStatus, TriggerMode, TriggerStatus, ArrangementStatus, OutputStage, UserNotificationStage, StepStatus, WaitSubscriptionStatus } from '../types/index.js';
+import { isRecordVisibleToClient, parseVisibleClientIds, resolveDisplayScope, resolveVisibleClientIds } from './visibility.js';
+import { broadcastArrangementCompleted, broadcastStepUpdate, broadcastTaskCompleted, broadcastTaskCreated, broadcastTaskEvent, broadcastTaskFailed, broadcastTaskUpdate, broadcastTriggerActivated } from '../websocket.js';
 
 export interface CreateTaskOptions {
   conversationId: string;
@@ -15,6 +17,7 @@ export interface CreateTaskOptions {
   originClientId?: string;
   syncPolicy?: string;
   visibleClientIds?: string[];
+  displayScope?: string;
   assignedDomainAgentId?: string;
   blocking?: 'blocking' | 'non-blocking';
   scheduledAt?: Date;
@@ -43,6 +46,9 @@ export class TaskService {
   async createTask(options: CreateTaskOptions): Promise<string> {
     const id = uuidv4();
     const now = new Date();
+    const visibleClientIds = resolveVisibleClientIds(options.originClientId, options.visibleClientIds);
+    const syncPolicy = options.syncPolicy || 'origin_only';
+    const displayScope = options.displayScope || resolveDisplayScope(syncPolicy, visibleClientIds);
 
     await db.insert(tasks).values({
       id,
@@ -50,8 +56,8 @@ export class TaskService {
       conversationId: options.conversationId,
       status: TaskStatus.PENDING,
       triggerMode: options.triggerMode || TriggerMode.IMMEDIATE,
-      triggerStatus: options.triggerMode === TriggerMode.IMMEDIATE 
-        ? TriggerStatus.READY 
+      triggerStatus: options.triggerMode === TriggerMode.IMMEDIATE
+        ? TriggerStatus.READY
         : (this.getInitialTriggerStatus(options.triggerMode || TriggerMode.IMMEDIATE) || TriggerStatus.READY),
       scheduledAt: options.scheduledAt,
       triggerRule: options.triggerRule ? JSON.stringify(options.triggerRule) : null,
@@ -60,8 +66,9 @@ export class TaskService {
       complexityDecisionSummary: options.complexityDecisionSummary,
       entryPoint: options.entryPoint || 'web',
       originClientId: options.originClientId,
-      syncPolicy: options.syncPolicy || 'synced_clients',
-      visibleClientIds: options.visibleClientIds ? JSON.stringify(options.visibleClientIds) : null,
+      syncPolicy,
+      visibleClientIds: visibleClientIds.length > 0 ? JSON.stringify(visibleClientIds) : null,
+      displayScope,
       queuePosition: options.triggerMode === TriggerMode.QUEUED ? 1 : null,
       assignedDomainAgentId: options.assignedDomainAgentId,
       arrangementStatus: options.parentTaskId ? ArrangementStatus.WAITING_FOR_ARRANGEMENT : null,
@@ -82,7 +89,7 @@ export class TaskService {
     if (options.triggerMode === TriggerMode.IMMEDIATE) {
       await this.addEvent(id, 'TaskReadyForPlanning', '任务已准备好进入规划');
     } else {
-      await this.addEvent(id, 'TaskTriggerWaiting', '任务已等待触发', { 
+      await this.addEvent(id, 'TaskTriggerWaiting', '任务已等待触发', {
         triggerMode: options.triggerMode,
         scheduledAt: options.scheduledAt
       });
@@ -90,6 +97,11 @@ export class TaskService {
 
     if (options.triggerMode !== TriggerMode.IMMEDIATE) {
       await this.createWaitSubscription(id, options);
+    }
+
+    const createdTask = await this.getTask(id);
+    if (createdTask) {
+      broadcastTaskCreated(id, { task: createdTask });
     }
 
     return id;
@@ -137,6 +149,15 @@ export class TaskService {
     });
   }
 
+  async getVisibleTask(id: string, clientId: string) {
+    const task = await this.getTask(id);
+    if (!task) {
+      return null;
+    }
+
+    return isRecordVisibleToClient(task, clientId) ? task : null;
+  }
+
   async getTasks(conversationId: string, limit = 50, offset = 0) {
     return db.select()
       .from(tasks)
@@ -144,6 +165,11 @@ export class TaskService {
       .orderBy(desc(tasks.createdAt))
       .limit(limit)
       .offset(offset);
+  }
+
+  async getVisibleTasks(conversationId: string, clientId: string, limit = 50, offset = 0) {
+    const rows = await this.getTasks(conversationId, limit, offset);
+    return rows.filter((task) => isRecordVisibleToClient(task, clientId));
   }
 
   async getSubTasks(parentTaskId: string) {
@@ -171,6 +197,23 @@ export class TaskService {
       .set(updates)
       .where(eq(tasks.id, id));
 
+    const updatedTask = await this.getTask(id);
+    if (updatedTask) {
+      broadcastTaskUpdate(id, { task: updatedTask, status });
+
+      if (status === TaskStatus.ARRANGED) {
+        broadcastArrangementCompleted(id, { task: updatedTask });
+      }
+
+      if (status === TaskStatus.COMPLETED) {
+        broadcastTaskCompleted(id, { task: updatedTask });
+      }
+
+      if (status === TaskStatus.FAILED) {
+        broadcastTaskFailed(id, updatedTask.errorMessage || 'Task failed', { task: updatedTask });
+      }
+    }
+
     const eventType = this.getStatusEventType(status);
     if (eventType) {
       await this.addEvent(id, eventType, `任务状态变更为 ${status}`);
@@ -197,6 +240,14 @@ export class TaskService {
     const sequence = (task.lastEventSequence || 0) + 1;
     const now = new Date();
     const id = uuidv4();
+    const payloadWithVisibility = {
+      ...(payload || {}),
+      entryPoint: task.entryPoint,
+      originClientId: task.originClientId,
+      syncPolicy: task.syncPolicy,
+      visibleClientIds: parseVisibleClientIds(task.visibleClientIds),
+      displayScope: task.displayScope
+    };
 
     await db.insert(taskEvents).values({
       id,
@@ -205,16 +256,35 @@ export class TaskService {
       eventType,
       timestamp: now,
       summary,
-      payload: payload ? JSON.stringify(payload) : null
+      payload: JSON.stringify(payloadWithVisibility)
     });
 
     await db.update(tasks)
-      .set({ 
+      .set({
         lastEventSequence: sequence,
         lastEventCursor: `${taskId}:${sequence}:${now.getTime()}`,
         updatedAt: now
       })
       .where(eq(tasks.id, taskId));
+
+    broadcastTaskEvent(taskId, {
+      id,
+      taskId,
+      sequence,
+      eventType,
+      timestamp: now,
+      summary,
+      payload: payloadWithVisibility
+    });
+
+    if (eventType === 'TaskTriggerActivated') {
+      broadcastTriggerActivated(taskId, {
+        taskId,
+        sequence,
+        summary,
+        payload: payloadWithVisibility
+      });
+    }
   }
 
   async getTaskEvents(taskId: string, limit = 100, cursor?: string) {
@@ -228,6 +298,22 @@ export class TaskService {
     }
 
     return query;
+  }
+
+  async getVisibleTaskEvents(taskId: string, clientId: string, limit = 100, cursor?: string) {
+    const task = await this.getVisibleTask(taskId, clientId);
+    if (!task) {
+      return [];
+    }
+
+    const events = await this.getTaskEvents(taskId, limit, cursor);
+    return events.filter((event) => isRecordVisibleToClient({
+      originClientId: task.originClientId,
+      syncPolicy: task.syncPolicy,
+      visibleClientIds: task.visibleClientIds,
+      displayScope: task.displayScope,
+      payload: event.payload
+    }, clientId));
   }
 
   async createStep(taskId: string, agentId: string, name: string, order: number): Promise<string> {
@@ -247,9 +333,24 @@ export class TaskService {
   }
 
   async updateStep(id: string, updates: Partial<typeof taskSteps.$inferInsert>) {
+    const existingStep = await db.query.taskSteps.findFirst({
+      where: eq(taskSteps.id, id)
+    });
+
     await db.update(taskSteps)
       .set(updates)
       .where(eq(taskSteps.id, id));
+
+    const step = await db.query.taskSteps.findFirst({
+      where: eq(taskSteps.id, id)
+    });
+
+    if (step) {
+      broadcastStepUpdate(step.taskId, id, step.status, { step });
+      if (updates.status && updates.status !== existingStep?.status) {
+        await this.addEvent(step.taskId, updates.status === StepStatus.COMPLETED ? 'TaskStepCompleted' : 'TaskStepUpdated', `步骤状态更新为 ${step.status}`, { stepId: id, status: step.status });
+      }
+    }
   }
 
   async getSteps(taskId: string) {
@@ -261,13 +362,20 @@ export class TaskService {
 
   async createOutput(taskId: string, type: 'final' | 'intermediate' | 'arrangement', content: string, summary?: string): Promise<string> {
     const id = uuidv4();
+    const createdAt = new Date();
     await db.insert(taskOutputs).values({
       id,
       taskId,
       type,
       content,
       summary,
-      createdAt: new Date()
+      createdAt
+    });
+
+    await this.addEvent(taskId, 'TaskOutputCreated', `新增${type === 'final' ? '最终' : '阶段'}输出`, {
+      outputId: id,
+      outputType: type,
+      summary
     });
     return id;
   }
@@ -329,7 +437,7 @@ export class TaskService {
 
   async failTask(id: string, errorCode: string, errorMessage: string, retryable = false) {
     await this.cancelWaitSubscriptions(id);
-    await this.updateTaskStatus(id, TaskStatus.FAILED, { 
+    await this.updateTaskStatus(id, TaskStatus.FAILED, {
       errorCode,
       errorMessage,
       retryable

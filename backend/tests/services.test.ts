@@ -83,13 +83,13 @@ describe('DTO Types', () => {
   it('should have valid CreateTaskDTO structure', () => {
     const dto = {
       triggerMode: 'immediate' as const,
-      entryPoint: 'web',
-      originClientId: 'client-123',
       intakeInputSummary: 'Test task'
     };
 
     expect(dto.triggerMode).toBeDefined();
-    expect(dto.entryPoint).toBeDefined();
+    expect(dto.intakeInputSummary).toBeDefined();
+    expect('entryPoint' in dto).toBe(false);
+    expect('originClientId' in dto).toBe(false);
   });
 
   it('should have valid PaginationResponse structure', () => {

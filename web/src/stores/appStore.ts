@@ -1,6 +1,10 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
 
+const ACTIVE_CONVERSATION_STORAGE_KEY = 'coobot-active-conversation-id';
+const MESSAGE_CACHE_STORAGE_KEY = 'coobot-message-cache';
+let activeConversationRequestId = 0;
+
 export interface Message {
   id: string;
   conversationId: string;
@@ -12,6 +16,40 @@ export interface Message {
     type: string;
     url: string;
   }>;
+}
+
+export interface PendingAttachment {
+  type: string;
+  name: string;
+  url: string;
+  file?: File;
+}
+
+function normalizeMessageAttachments(message: Message): Message {
+  if (!message.attachments) {
+    return message;
+  }
+
+  if (Array.isArray(message.attachments)) {
+    return message;
+  }
+
+  try {
+    const parsed = JSON.parse(message.attachments as unknown as string);
+    return {
+      ...message,
+      attachments: Array.isArray(parsed) ? parsed : []
+    };
+  } catch {
+    return {
+      ...message,
+      attachments: []
+    };
+  }
+}
+
+function normalizeMessages(messages: Message[]): Message[] {
+  return messages.map(normalizeMessageAttachments);
 }
 
 export interface Task {
@@ -76,7 +114,98 @@ interface TaskOutput {
   createdAt: string;
 }
 
+interface RealtimeEvent {
+  type: string;
+  taskId?: string;
+  conversationId?: string;
+  data?: {
+    task?: Task;
+  };
+  message?: Message;
+}
+
 type ViewType = 'chat' | 'tasks' | 'knowledge' | 'memory' | 'agents' | 'skills' | 'settings' | 'result';
+
+interface FetchOptions {
+  silent?: boolean;
+}
+
+function upsertTaskIntoList(tasks: Task[], nextTask: Task): Task[] {
+  const existingIndex = tasks.findIndex((task) => task.id === nextTask.id);
+  if (existingIndex === -1) {
+    return [nextTask, ...tasks];
+  }
+
+  return tasks.map((task) => (task.id === nextTask.id ? { ...task, ...nextTask } : task));
+}
+
+function sortMessagesByCreatedAt(messages: Message[]) {
+  return [...messages].sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
+}
+
+function getStoredConversationId() {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  return window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+}
+
+function persistConversationId(conversationId: string | null | undefined) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  if (conversationId) {
+    window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, conversationId);
+    return;
+  }
+
+  window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+}
+
+function readMessageCache(): Record<string, Message[]> {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+
+  const rawValue = window.localStorage.getItem(MESSAGE_CACHE_STORAGE_KEY);
+  if (!rawValue) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue) as Record<string, Message[]>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function getCachedMessages(conversationId: string): Message[] {
+  const cache = readMessageCache();
+  const messages = cache[conversationId];
+  return Array.isArray(messages) ? normalizeMessages(messages) : [];
+}
+
+function persistMessages(conversationId: string, messages: Message[]) {
+  if (typeof window === 'undefined' || !conversationId) {
+    return;
+  }
+
+  const cache = readMessageCache();
+  cache[conversationId] = normalizeMessages(messages);
+  window.localStorage.setItem(MESSAGE_CACHE_STORAGE_KEY, JSON.stringify(cache));
+}
+
+function beginConversationRequest() {
+  activeConversationRequestId += 1;
+  return activeConversationRequestId;
+}
+
+function isLatestConversationRequest(requestId: number) {
+  return requestId === activeConversationRequestId;
+}
 
 interface AppState {
   activeView: ViewType;
@@ -92,21 +221,20 @@ interface AppState {
   isLoading: boolean;
   error: string | null;
   wsConnected: boolean;
-  
+
   setActiveView: (view: ViewType) => void;
   setSelectedTaskId: (taskId: string | null) => void;
-  init: () => Promise<void>;
-  sendMessage: (content: string, attachments?: Array<{ type: string; name: string; url: string }>) => Promise<void>;
-  fetchTasks: () => Promise<void>;
-  fetchTaskDetail: (taskId: string) => Promise<void>;
+  init: (conversationId?: string) => Promise<void>;
+  switchConversation: (conversationId: string) => Promise<void>;
+  sendMessage: (content: string, attachments?: PendingAttachment[]) => Promise<void>;
+  fetchMessages: (options?: FetchOptions) => Promise<void>;
+  fetchTasks: (options?: FetchOptions) => Promise<void>;
+  fetchTaskDetail: (taskId: string, options?: FetchOptions) => Promise<void>;
   cancelTask: (taskId: string) => Promise<void>;
+  retryTask: (taskId: string) => Promise<void>;
+  setWsConnected: (connected: boolean) => void;
+  handleRealtimeEvent: (event: RealtimeEvent) => Promise<void>;
 }
-
-const generateClientId = () => {
-  return `web-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-};
-
-const clientId = generateClientId();
 
 export const useAppStore = create<AppState>((set, get) => ({
   activeView: 'chat',
@@ -124,7 +252,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   wsConnected: false,
 
   setActiveView: (view) => set({ activeView: view }),
-  
+  setWsConnected: (connected) => set({ wsConnected: connected }),
+
   setSelectedTaskId: (taskId) => {
     set({ selectedTaskId: taskId });
     if (taskId) {
@@ -134,31 +263,118 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  init: async () => {
+  init: async (targetConversationId?: string) => {
+    const requestId = beginConversationRequest();
     try {
       set({ isLoading: true });
-      const conversation = await api.getConversation(clientId) as { id: string };
-      set({ conversationId: conversation.id });
-      
+      const preferredConversationId = targetConversationId || getStoredConversationId() || undefined;
+      let conversation: { id: string };
+
+      try {
+        conversation = await api.getConversation(preferredConversationId) as { id: string };
+      } catch (error) {
+        if (!preferredConversationId) {
+          throw error;
+        }
+
+        persistConversationId(null);
+        conversation = await api.getConversation() as { id: string };
+      }
+
+      if (!isLatestConversationRequest(requestId)) {
+        return;
+      }
+
+      persistConversationId(conversation.id);
+      const cachedMessages = getCachedMessages(conversation.id);
+      set({ conversationId: conversation.id, messages: cachedMessages });
+
       const messages = await api.getMessages(conversation.id) as Message[];
-      set({ messages });
-      
+      if (!isLatestConversationRequest(requestId)) {
+        return;
+      }
+      const normalizedMessages = normalizeMessages(messages);
+      persistMessages(conversation.id, normalizedMessages);
+      set({ messages: normalizedMessages });
+
       const tasks = await api.getTasks(conversation.id) as Task[];
+      if (!isLatestConversationRequest(requestId)) {
+        return;
+      }
       set({ tasks });
     } catch (error: any) {
-      set({ error: error.message });
+      if (isLatestConversationRequest(requestId)) {
+        set({ error: error.message });
+      }
     } finally {
-      set({ isLoading: false });
+      if (isLatestConversationRequest(requestId)) {
+        set({ isLoading: false });
+      }
     }
   },
 
-  sendMessage: async (content: string, attachments?: Array<{ type: string; name: string; url: string }>) => {
+  switchConversation: async (nextConversationId: string) => {
+    const { conversationId: currentConversationId } = get();
+    if (!nextConversationId || nextConversationId === currentConversationId) {
+      return;
+    }
+
+    const requestId = beginConversationRequest();
+
+    try {
+      await api.getConversation(nextConversationId);
+      if (!isLatestConversationRequest(requestId)) {
+        return;
+      }
+      persistConversationId(nextConversationId);
+      const cachedMessages = getCachedMessages(nextConversationId);
+
+      set({
+        isLoading: true,
+        conversationId: nextConversationId,
+        messages: cachedMessages,
+        selectedTaskId: null,
+        currentTask: null,
+        currentTaskSteps: [],
+        currentTaskOutputs: [],
+        currentTaskEvents: [],
+        error: null
+      });
+
+      const [serverMessages, tasks] = await Promise.all([
+        api.getMessages(nextConversationId) as Promise<Message[]>,
+        api.getTasks(nextConversationId) as Promise<Task[]>
+      ]);
+
+      if (!isLatestConversationRequest(requestId)) {
+        return;
+      }
+
+      const normalizedMessages = normalizeMessages(serverMessages);
+      persistMessages(nextConversationId, normalizedMessages);
+
+      set({
+        messages: normalizedMessages,
+        tasks
+      });
+    } catch (error: any) {
+      if (isLatestConversationRequest(requestId)) {
+        set({ error: error.message });
+      }
+    } finally {
+      if (isLatestConversationRequest(requestId)) {
+        set({ isLoading: false });
+      }
+    }
+  },
+
+  sendMessage: async (content: string, attachments?: PendingAttachment[]) => {
     const { conversationId, messages } = get();
     if ((!content.trim() && (!attachments || attachments.length === 0)) || !conversationId) return;
 
     try {
       set({ isLoading: true });
-      
+
       const userMessage: Message = {
         id: `temp-${Date.now()}`,
         conversationId,
@@ -166,7 +382,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         content,
         createdAt: new Date().toISOString()
       };
-      
+
       let messageWithAttachments = { ...userMessage };
       if (attachments && attachments.length > 0) {
         messageWithAttachments = {
@@ -178,24 +394,32 @@ export const useAppStore = create<AppState>((set, get) => ({
           }))
         };
       }
-      
-      set({ messages: [...messages, messageWithAttachments] });
 
-      const result = await api.sendMessage(conversationId, content, clientId, attachments) as { taskId: string };
-      
-      const assistantMessage: Message = {
-        id: `temp-${Date.now()}-1`,
-        conversationId,
-        role: 'assistant',
-        content: `任务已创建: ${result.taskId}`,
-        createdAt: new Date().toISOString()
-      };
-      
-      const updatedMessages = [...messages, messageWithAttachments, assistantMessage];
-      set({ messages: updatedMessages });
-      
-      const tasks = await api.getTasks(conversationId) as Task[];
-      set({ tasks });
+      set({ messages: [...messages, messageWithAttachments] });
+      persistMessages(conversationId, [...messages, messageWithAttachments]);
+
+      const result = await api.sendMessage(conversationId, content, attachments) as { taskId?: string; focusTaskId?: string };
+      const focusTaskId = result.focusTaskId || result.taskId || null;
+
+      const [serverMessages, tasks] = await Promise.all([
+        api.getMessages(conversationId) as Promise<Message[]>,
+        api.getTasks(conversationId) as Promise<Task[]>
+      ]);
+
+      persistConversationId(conversationId);
+      const normalizedMessages = normalizeMessages(serverMessages);
+      persistMessages(conversationId, normalizedMessages);
+
+      set({
+        messages: normalizedMessages,
+        tasks,
+        currentTask: focusTaskId ? tasks.find((task) => task.id === focusTaskId) || null : null,
+        selectedTaskId: focusTaskId
+      });
+
+      if (focusTaskId) {
+        await get().fetchTaskDetail(focusTaskId);
+      }
     } catch (error: any) {
       set({ error: error.message });
     } finally {
@@ -203,39 +427,169 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  fetchTasks: async () => {
+  fetchMessages: async (options) => {
     const { conversationId } = get();
     if (!conversationId) return;
-    
-    try {
-      const tasks = await api.getTasks(conversationId) as Task[];
-      set({ tasks });
-    } catch (error: any) {
-      set({ error: error.message });
-    }
-  },
+    const requestedConversationId = conversationId;
 
-  fetchTaskDetail: async (taskId: string) => {
     try {
-      set({ isLoading: true });
-      const [steps, outputs] = await Promise.all([
-        api.getTaskSteps(taskId) as Promise<TaskStep[]>,
-        api.getTaskOutputs(taskId) as Promise<TaskOutput[]>
-      ]);
-      set({ currentTaskSteps: steps, currentTaskOutputs: outputs });
+      if (!options?.silent) {
+        set({ isLoading: true });
+      }
+
+      if (options?.silent) {
+        const cachedMessages = getCachedMessages(conversationId);
+        if (cachedMessages.length > 0) {
+          set({ messages: cachedMessages });
+        }
+      }
+
+      const messages = await api.getMessages(requestedConversationId) as Message[];
+      if (get().conversationId !== requestedConversationId) {
+        return;
+      }
+      const normalizedMessages = normalizeMessages(messages);
+      persistMessages(requestedConversationId, normalizedMessages);
+      set({ messages: normalizedMessages });
     } catch (error: any) {
       set({ error: error.message });
     } finally {
-      set({ isLoading: false });
+      if (!options?.silent) {
+        set({ isLoading: false });
+      }
+    }
+  },
+
+  fetchTasks: async (options) => {
+    const { conversationId, currentTask } = get();
+    if (!conversationId) return;
+    const requestedConversationId = conversationId;
+
+    try {
+      if (!options?.silent) {
+        set({ isLoading: true });
+      }
+
+      const tasks = await api.getTasks(requestedConversationId) as Task[];
+      if (get().conversationId !== requestedConversationId) {
+        return;
+      }
+      const refreshedCurrentTask = currentTask
+        ? tasks.find((task) => task.id === currentTask.id) || currentTask
+        : null;
+
+      set({
+        tasks,
+        currentTask: refreshedCurrentTask
+      });
+    } catch (error: any) {
+      set({ error: error.message });
+    } finally {
+      if (!options?.silent) {
+        set({ isLoading: false });
+      }
+    }
+  },
+
+  fetchTaskDetail: async (taskId: string, options) => {
+    try {
+      if (!options?.silent) {
+        set({ isLoading: true });
+      }
+
+      const [task, steps, outputs, events] = await Promise.all([
+        api.getTask(taskId) as Promise<Task>,
+        api.getTaskSteps(taskId) as Promise<TaskStep[]>,
+        api.getTaskOutputs(taskId) as Promise<TaskOutput[]>,
+        api.getTaskEvents(taskId) as Promise<any[]>
+      ]);
+
+      set((state) => ({
+        currentTask: task,
+        currentTaskSteps: steps,
+        currentTaskOutputs: outputs,
+        currentTaskEvents: events,
+        tasks: upsertTaskIntoList(state.tasks, task)
+      }));
+    } catch (error: any) {
+      set({ error: error.message });
+    } finally {
+      if (!options?.silent) {
+        set({ isLoading: false });
+      }
     }
   },
 
   cancelTask: async (taskId: string) => {
     try {
       await api.cancelTask(taskId);
-      await get().fetchTasks();
+      await get().fetchTasks({ silent: true });
+      await get().fetchTaskDetail(taskId, { silent: true });
     } catch (error: any) {
       set({ error: error.message });
+    }
+  },
+
+  retryTask: async (taskId: string) => {
+    try {
+      await api.retryTask(taskId);
+      await get().fetchTasks({ silent: true });
+      await get().fetchTaskDetail(taskId, { silent: true });
+    } catch (error: any) {
+      set({ error: error.message });
+    }
+  },
+
+  handleRealtimeEvent: async (event) => {
+    const { conversationId, currentTask, selectedTaskId, messages } = get();
+
+    switch (event.type) {
+      case 'connected':
+        set({ wsConnected: true });
+        return;
+      case 'message.new': {
+        if (!event.message || event.conversationId !== conversationId) {
+          return;
+        }
+
+        const nextMessage = normalizeMessageAttachments(event.message);
+        const deduped = messages.filter((message) => message.id !== nextMessage.id);
+        const nextMessages = sortMessagesByCreatedAt([...deduped, nextMessage]);
+        if (conversationId) {
+          persistMessages(conversationId, nextMessages);
+        }
+        set({ messages: nextMessages });
+        return;
+      }
+      case 'task.created':
+      case 'task.updated':
+      case 'task.completed':
+      case 'task.failed': {
+        if (event.data?.task) {
+          set((state) => ({
+            tasks: upsertTaskIntoList(state.tasks, event.data!.task!),
+            currentTask: state.currentTask?.id === event.data!.task!.id ? event.data!.task! : state.currentTask
+          }));
+        } else {
+          await get().fetchTasks({ silent: true });
+        }
+
+        if (event.taskId && (event.taskId === currentTask?.id || event.taskId === selectedTaskId)) {
+          await get().fetchTaskDetail(event.taskId, { silent: true });
+        }
+        return;
+      }
+      case 'task.event':
+      case 'step.updated':
+      case 'arrangement.completed':
+      case 'trigger.activated':
+        await get().fetchTasks({ silent: true });
+        if (event.taskId && (event.taskId === currentTask?.id || event.taskId === selectedTaskId)) {
+          await get().fetchTaskDetail(event.taskId, { silent: true });
+        }
+        return;
+      default:
+        return;
     }
   }
 }));
