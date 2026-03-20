@@ -34,7 +34,11 @@ export class ToolService {
       name: 'read_file',
       description: '读取文件内容',
       parameters: [
-        { name: 'path', type: 'string', description: '文件路径', required: true }
+        { name: 'path', type: 'string', description: '文件路径', required: true },
+        { name: 'startLine', type: 'number', description: '起始行号(1-based)', required: false },
+        { name: 'lineCount', type: 'number', description: '读取行数窗口', required: false },
+        { name: 'startOffset', type: 'number', description: '起始字符偏移(>=0，与startLine互斥)', required: false },
+        { name: 'length', type: 'number', description: '按偏移读取长度', required: false },
       ],
       requiresPermission: false
     }, async (params: any) => {
@@ -51,6 +55,22 @@ export class ToolService {
       requiresPermission: true
     }, async (params: any) => {
       return sandboxService.execute({ toolName: 'write_file', parameters: params });
+    });
+
+    this.registerTool({
+      name: 'edit_file',
+      description: '编辑文件内容(仅支持按位置区间编辑)',
+      parameters: [
+        { name: 'path', type: 'string', description: '文件路径', required: true },
+        { name: 'startLine', type: 'number', description: '起始行号(1-based)', required: true },
+        { name: 'startColumn', type: 'number', description: '起始列号(1-based)', required: true },
+        { name: 'endLine', type: 'number', description: '结束行号(1-based)', required: false },
+        { name: 'endColumn', type: 'number', description: '结束列号(1-based)', required: false },
+        { name: 'newText', type: 'string', description: '替换文本', required: true },
+      ],
+      requiresPermission: true
+    }, async (params: any) => {
+      return sandboxService.execute({ toolName: 'edit_file', parameters: params });
     });
 
     this.registerTool({
@@ -136,7 +156,7 @@ export class ToolService {
   }
 
   getToolsForAgent(agentId: string, boundSkills: string[]): ToolDefinition[] {
-    return Array.from(this.tools.values()).filter(tool => 
+    return Array.from(this.tools.values()).filter(tool =>
       !tool.requiresPermission || boundSkills.length > 0
     );
   }
@@ -153,8 +173,8 @@ export class ToolService {
     }
 
     if (tool.requiresPermission && !skipPermissionCheck) {
-      return { 
-        success: false, 
+      return {
+        success: false,
         error: 'Permission required',
         data: { requiresPermission: true, toolName }
       };
@@ -167,7 +187,7 @@ export class ToolService {
 
     try {
       const result = await handler(parameters);
-      
+
       await auditService.logToolInvocation(taskId, toolName, parameters, result);
 
       return {
@@ -190,7 +210,7 @@ export class ToolService {
     }
 
     const errors: string[] = [];
-    
+
     for (const param of tool.parameters) {
       if (param.required && !(param.name in parameters)) {
         errors.push(`Missing required parameter: ${param.name}`);

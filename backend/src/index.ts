@@ -4,7 +4,7 @@ import fileUpload from 'express-fileupload';
 import { createServer } from 'http';
 import { router } from './routes/index.js';
 import { setupWebSocket, closeWebSocket } from './websocket.js';
-import { schedulerService } from './services/index.js';
+import { schedulerService, memoryConsolidationService } from './services/index.js';
 import { closeDb } from './db/index.js';
 import config from 'config';
 import pino from 'pino';
@@ -43,9 +43,53 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 
 const server = createServer(app);
 
+let memoryConsolidationTimer: NodeJS.Timeout | null = null;
+let memoryConsolidationBootTimer: NodeJS.Timeout | null = null;
+
+async function runDailyMemoryConsolidation() {
+  try {
+    const result = await memoryConsolidationService.consolidateDailyMemories();
+    logger.info({
+      totalConversations: result.totalConversations,
+      totalMessages: result.totalMessages,
+      memoriesCreated: result.memoriesCreated,
+      summary: result.summary
+    }, 'Daily memory consolidation completed');
+  } catch (error: any) {
+    logger.error({ error: error?.message || String(error) }, 'Daily memory consolidation failed');
+  }
+}
+
+function scheduleDailyMemoryConsolidation() {
+  const now = new Date();
+  const next = new Date(now);
+  next.setDate(now.getDate() + 1);
+  next.setHours(0, 10, 0, 0);
+  const delayMs = Math.max(10_000, next.getTime() - now.getTime());
+
+  memoryConsolidationBootTimer = setTimeout(async () => {
+    await runDailyMemoryConsolidation();
+    memoryConsolidationTimer = setInterval(runDailyMemoryConsolidation, 24 * 60 * 60 * 1000);
+  }, delayMs);
+
+  logger.info({ nextRunAt: next.toISOString() }, 'Daily memory consolidation scheduled');
+}
+
+function stopMemoryConsolidationSchedule() {
+  if (memoryConsolidationBootTimer) {
+    clearTimeout(memoryConsolidationBootTimer);
+    memoryConsolidationBootTimer = null;
+  }
+  if (memoryConsolidationTimer) {
+    clearInterval(memoryConsolidationTimer);
+    memoryConsolidationTimer = null;
+  }
+}
+
 setupWebSocket(server);
 
 schedulerService.start();
+scheduleDailyMemoryConsolidation();
 
 server.listen(port, host, () => {
   logger.info(`BiosBot server running on http://${host}:${port}`);
@@ -54,6 +98,7 @@ server.listen(port, host, () => {
 
 process.on('SIGINT', () => {
   logger.info('Shutting down...');
+  stopMemoryConsolidationSchedule();
   schedulerService.stop();
   closeWebSocket();
   closeDb();
@@ -62,6 +107,7 @@ process.on('SIGINT', () => {
 
 process.on('SIGTERM', () => {
   logger.info('Shutting down...');
+  stopMemoryConsolidationSchedule();
   schedulerService.stop();
   closeWebSocket();
   closeDb();

@@ -1,20 +1,13 @@
 [
   {
-    "id": "gpt-4",
-    "name": "GPT-4",
+    "id": "qwen-plus-2025-07-28",
+    "name": "qwen-plus-2025-07-28",
     "provider": "openai",
+    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "apiKey": "sk-f1450f3f4f804d0487851efa26009094",
     "defaultTemperature": 0.7,
     "defaultMaxTokens": 4096,
     "timeout": 120000,
-    "enabled": true
-  },
-  {
-    "id": "gpt-3.5-turbo",
-    "name": "GPT-3.5 Turbo",
-    "provider": "openai",
-    "defaultTemperature": 0.7,
-    "defaultMaxTokens": 4096,
-    "timeout": 60000,
     "enabled": true
   }
 ]

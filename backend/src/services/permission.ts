@@ -1,9 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
+import config from 'config';
 import { db } from '../db/index.js';
-import { permissionDecisionLogs, permissionPolicies, permissionRequests, tasks } from '../db/schema.js';
-import { eq, and, asc } from 'drizzle-orm';
+import { agentSkillPermissionBindings, permissionDecisionLogs, permissionPolicies, permissionRequests, tasks } from '../db/schema.js';
+import { eq, and, asc, inArray } from 'drizzle-orm';
 import { PermissionAction, PermissionDecision } from '../types/index.js';
 import { broadcastPermissionRequest } from '../websocket.js';
+import { taskService } from './task.js';
 
 export interface PermissionCheckRequest {
   taskId: string;
@@ -28,6 +30,15 @@ export interface PermissionTrace {
   reason?: string;
 }
 
+type PermissionRisk = 'low' | 'medium' | 'high';
+
+interface AskTimeoutConfig {
+  defaultTimeoutMs: number;
+  maxTimeoutMs: number;
+  autoUpgradeOnTimeout: boolean;
+  riskBasedTimeout: boolean;
+}
+
 function parseJsonObject(value: string | null | undefined) {
   if (!value) {
     return {} as Record<string, any>;
@@ -45,70 +56,104 @@ function isMissingTableError(error: unknown) {
   return typeof (error as any)?.message === 'string' && /no such table/i.test((error as any).message);
 }
 
+function getOptionalConfig<T>(key: string, fallback: T): T {
+  try {
+    return (config.get(key) as T) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export class PermissionService {
-  private defaultPolicies = {
-    [PermissionAction.READ]: PermissionDecision.ALLOW,
-    [PermissionAction.WRITE]: PermissionDecision.ASK,
-    [PermissionAction.EXECUTE]: PermissionDecision.DENY
+  private askTimeoutConfig: AskTimeoutConfig = {
+    defaultTimeoutMs: Number(getOptionalConfig('permission.askTimeout.defaultMs', 300000)),
+    maxTimeoutMs: Number(getOptionalConfig('permission.askTimeout.maxMs', 1800000)),
+    autoUpgradeOnTimeout: Boolean(getOptionalConfig('permission.askTimeout.autoUpgradeOnTimeout', false)),
+    riskBasedTimeout: Boolean(getOptionalConfig('permission.askTimeout.riskBasedTimeout', true))
   };
 
   async check(request: PermissionCheckRequest): Promise<PermissionCheckResult> {
+    await this.handleTimedOutRequests();
+
     const trace: PermissionTrace[] = [];
 
-    const globalPolicies = await this.getPoliciesForCheck(undefined, undefined, undefined);
-    const agentPolicies = request.agentId
-      ? await this.getPoliciesForCheck(request.agentId, undefined, undefined)
-      : [];
-    const skillPolicies = request.skillId
-      ? await this.getPoliciesForCheck(undefined, request.skillId, undefined)
-      : [];
-    const toolPolicies = request.toolName
-      ? await this.getPoliciesForCheck(undefined, undefined, request.toolName)
-      : [];
-
-    const allPolicies = [...globalPolicies, ...agentPolicies, ...skillPolicies, ...toolPolicies];
+    const approvedRequest = await this.findReusablePermissionRequest(request, ['approved']);
+    if (approvedRequest) {
+      trace.push({
+        layer: 'approved_request',
+        policy: { requestId: approvedRequest.id },
+        decision: PermissionDecision.ALLOW,
+        reason: 'reuse approved request for same task/action/target'
+      });
+      return {
+        decision: PermissionDecision.ALLOW,
+        requestId: approvedRequest.id,
+        trace
+      };
+    }
 
     const actionMap: Record<PermissionAction, PermissionDecision> = {
-      [PermissionAction.READ]: this.defaultPolicies[PermissionAction.READ],
-      [PermissionAction.WRITE]: this.defaultPolicies[PermissionAction.WRITE],
-      [PermissionAction.EXECUTE]: this.defaultPolicies[PermissionAction.EXECUTE]
+      [PermissionAction.READ]: PermissionDecision.ASK,
+      [PermissionAction.WRITE]: PermissionDecision.ASK,
+      [PermissionAction.EXECUTE]: PermissionDecision.ASK
     };
 
     trace.push({
       layer: 'default',
-      policy: this.defaultPolicies,
+      policy: { read: 'ask', write: 'ask', execute: 'ask' },
       decision: actionMap[request.action]
     });
 
-    for (const policy of allPolicies) {
-      let decision: PermissionDecision;
-
-      switch (request.action) {
-        case PermissionAction.READ:
-          decision = (policy.readAction as PermissionDecision) || PermissionDecision.ALLOW;
-          break;
-        case PermissionAction.WRITE:
-          decision = (policy.writeAction as PermissionDecision) || PermissionDecision.ASK;
-          break;
-        case PermissionAction.EXECUTE:
-          decision = (policy.executeAction as PermissionDecision) || PermissionDecision.DENY;
-          break;
-      }
-
+    const skillToolBinding = await this.getAgentSkillToolPermissionBinding(request);
+    if (skillToolBinding) {
+      const bindingDecision = this.getPolicyDecision(skillToolBinding, request.action);
       trace.push({
-        layer: this.getPolicyLayer(policy),
-        policy,
-        decision
+        layer: 'agent_skill_tool_binding',
+        policy: skillToolBinding,
+        decision: bindingDecision,
+        reason: 'permission declared by skill tool and configured on agent-skill binding'
       });
+      actionMap[request.action] = bindingDecision;
+    }
 
-      if (this.isTighter(decision, actionMap[request.action])) {
-        actionMap[request.action] = decision;
+    const allPolicies = await this.getPoliciesOrderedByPriority();
+
+    const layerBuckets = {
+      global: allPolicies.filter((policy) => !policy.agentId && !policy.skillId && !policy.toolName && !policy.resourcePattern),
+      agent: allPolicies.filter((policy) => policy.agentId && policy.agentId === request.agentId),
+      skill: allPolicies.filter((policy) => policy.skillId && policy.skillId === request.skillId),
+      tool: allPolicies.filter((policy) => policy.toolName && policy.toolName === request.toolName),
+      resource: allPolicies.filter((policy) => this.matchesResourcePolicy(policy, request))
+    };
+
+    for (const [layer, policies] of Object.entries(layerBuckets) as Array<[string, any[]]>) {
+      for (const policy of policies) {
+        const decision = this.getPolicyDecision(policy, request.action);
+        trace.push({ layer, policy, decision });
+        if (this.isTighter(decision, actionMap[request.action])) {
+          actionMap[request.action] = decision;
+        }
       }
     }
 
     const finalDecision = actionMap[request.action];
 
     if (finalDecision === PermissionDecision.ASK) {
+      const pendingRequest = await this.findReusablePermissionRequest(request, ['pending']);
+      if (pendingRequest) {
+        trace.push({
+          layer: 'pending_request',
+          policy: { requestId: pendingRequest.id },
+          decision: PermissionDecision.ASK,
+          reason: 'reuse pending request for same task/action/target'
+        });
+        return {
+          decision: finalDecision,
+          requestId: pendingRequest.id,
+          trace
+        };
+      }
+
       const requestId = await this.createPermissionRequest(request, trace);
       return { decision: finalDecision, requestId, trace };
     }
@@ -116,11 +161,61 @@ export class PermissionService {
     return { decision: finalDecision, trace };
   }
 
+  private normalizeTarget(target: string): string {
+    return target
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/^\.\//, '')
+      .toLowerCase();
+  }
+
+  private async findReusablePermissionRequest(
+    request: PermissionCheckRequest,
+    statuses: Array<'pending' | 'approved' | 'denied'>
+  ) {
+    if (statuses.length === 0) {
+      return null;
+    }
+
+    const candidates = await db.select()
+      .from(permissionRequests)
+      .where(and(
+        eq(permissionRequests.taskId, request.taskId),
+        eq(permissionRequests.action, request.action),
+        inArray(permissionRequests.status, statuses)
+      ))
+      .orderBy(asc(permissionRequests.createdAt));
+
+    const normalizedTarget = this.normalizeTarget(request.target);
+    for (let index = candidates.length - 1; index >= 0; index--) {
+      const candidate = candidates[index];
+      if (this.normalizeTarget(candidate.target) === normalizedTarget) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
   private getPolicyLayer(policy: any): string {
+    if (policy.resourcePattern) return 'resource';
     if (policy.agentId) return 'agent';
     if (policy.skillId) return 'skill';
     if (policy.toolName) return 'tool';
     return 'global';
+  }
+
+  private getPolicyDecision(policy: any, action: PermissionAction): PermissionDecision {
+    switch (action) {
+      case PermissionAction.READ:
+        return (policy.readAction as PermissionDecision) || PermissionDecision.ALLOW;
+      case PermissionAction.WRITE:
+        return (policy.writeAction as PermissionDecision) || PermissionDecision.ASK;
+      case PermissionAction.EXECUTE:
+        return (policy.executeAction as PermissionDecision) || PermissionDecision.DENY;
+      default:
+        return PermissionDecision.DENY;
+    }
   }
 
   private isTighter(a: PermissionDecision, b: PermissionDecision): boolean {
@@ -128,15 +223,161 @@ export class PermissionService {
     return priority[a] > priority[b];
   }
 
-  private async getPoliciesForCheck(agentId?: string, skillId?: string, toolName?: string) {
-    const conditions = [];
-    if (agentId) conditions.push(eq(permissionPolicies.agentId, agentId));
-    if (skillId) conditions.push(eq(permissionPolicies.skillId, skillId));
-    if (toolName) conditions.push(eq(permissionPolicies.toolName, toolName));
+  private async getPoliciesOrderedByPriority() {
+    return db.select().from(permissionPolicies).orderBy(asc(permissionPolicies.priority));
+  }
 
-    return db.select()
-      .from(permissionPolicies)
-      .where(conditions.length > 0 ? and(...conditions) : undefined);
+  private async getAgentSkillToolPermissionBinding(request: PermissionCheckRequest) {
+    if (!request.agentId || !request.skillId || !request.toolName) {
+      return null;
+    }
+
+    try {
+      const [binding] = await db.select().from(agentSkillPermissionBindings).where(and(
+        eq(agentSkillPermissionBindings.agentId, request.agentId),
+        eq(agentSkillPermissionBindings.skillId, request.skillId),
+        eq(agentSkillPermissionBindings.toolName, request.toolName)
+      ));
+
+      return binding || null;
+    } catch (error) {
+      if (isMissingTableError(error)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private patternToRegExp(pattern: string): RegExp {
+    const escaped = pattern
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}$`, 'i');
+  }
+
+  private matchesResourcePolicy(policy: any, request: PermissionCheckRequest): boolean {
+    if (!policy.resourcePattern) {
+      return false;
+    }
+
+    if (policy.agentId && policy.agentId !== request.agentId) {
+      return false;
+    }
+
+    if (policy.skillId && policy.skillId !== request.skillId) {
+      return false;
+    }
+
+    if (policy.toolName && policy.toolName !== request.toolName) {
+      return false;
+    }
+
+    return this.patternToRegExp(policy.resourcePattern).test(request.target);
+  }
+
+  private getPermissionRisk(action: PermissionAction, target: string): PermissionRisk {
+    if (action === PermissionAction.EXECUTE) {
+      return 'high';
+    }
+
+    if (action === PermissionAction.WRITE) {
+      const lowerTarget = target.toLowerCase();
+      if (/(\.exe|\.bat|\.ps1|\.sh|\.py|\.js)$/.test(lowerTarget)) {
+        return 'high';
+      }
+      return 'medium';
+    }
+
+    return 'low';
+  }
+
+  private resolveAskTimeoutMs(action: PermissionAction, target: string): number {
+    if (!this.askTimeoutConfig.riskBasedTimeout) {
+      return Math.min(this.askTimeoutConfig.defaultTimeoutMs, this.askTimeoutConfig.maxTimeoutMs);
+    }
+
+    const risk = this.getPermissionRisk(action, target);
+    if (risk === 'high') return Math.min(60000, this.askTimeoutConfig.maxTimeoutMs);
+    if (risk === 'medium') return Math.min(120000, this.askTimeoutConfig.maxTimeoutMs);
+    return Math.min(300000, this.askTimeoutConfig.maxTimeoutMs);
+  }
+
+  private async handleTimedOutRequests() {
+    const pendingRequests = await db.select()
+      .from(permissionRequests)
+      .where(eq(permissionRequests.status, 'pending'));
+
+    const now = Date.now();
+    for (const request of pendingRequests) {
+      const timeoutMs = this.resolveAskTimeoutMs(request.action as PermissionAction, request.target);
+      const createdAtMs = request.createdAt ? new Date(request.createdAt).getTime() : now;
+      if (now - createdAtMs <= timeoutMs) {
+        continue;
+      }
+
+      const timeoutReason = `Permission request timed out after ${Math.floor(timeoutMs / 1000)}s`;
+      const shouldDeny = this.askTimeoutConfig.autoUpgradeOnTimeout;
+      let shouldRecordTimeoutEvent = false;
+
+      if (shouldDeny) {
+        await db.update(permissionRequests)
+          .set({
+            status: 'denied',
+            reason: timeoutReason,
+            decidedAt: new Date(),
+            decidedBy: 'system-timeout'
+          })
+          .where(eq(permissionRequests.id, request.id));
+
+        await this.setTaskPermissionState(request.taskId, 'denied', timeoutReason);
+        shouldRecordTimeoutEvent = true;
+      } else if (!request.reason?.startsWith('TIMEOUT_NOTIFIED:')) {
+        await db.update(permissionRequests)
+          .set({ reason: `TIMEOUT_NOTIFIED:${new Date().toISOString()}` })
+          .where(eq(permissionRequests.id, request.id));
+
+        await this.setTaskPermissionState(request.taskId, 'pending', timeoutReason);
+        shouldRecordTimeoutEvent = true;
+      }
+
+      if (shouldRecordTimeoutEvent) {
+        const timeoutAlreadyRecorded = await this.hasTimeoutDecisionRecorded(request.id);
+        if (timeoutAlreadyRecorded) {
+          continue;
+        }
+
+        await this.appendDecisionLog({
+          id: uuidv4(),
+          requestId: request.id,
+          policyId: null,
+          action: request.action,
+          decision: shouldDeny ? 'denied' : 'timeout',
+          reason: JSON.stringify({
+            layer: 'timeout',
+            timeoutMs,
+            autoUpgradedToDeny: shouldDeny,
+            eventType: 'PermissionCheckTimeout'
+          }),
+          createdAt: new Date()
+        });
+
+        await taskService.addEvent(request.taskId, 'PermissionCheckTimeout', '权限确认超时', {
+          requestId: request.id,
+          action: request.action,
+          target: request.target,
+          timeoutMs,
+          autoUpgradedToDeny: shouldDeny
+        });
+      }
+    }
+  }
+
+  private async hasTimeoutDecisionRecorded(requestId: string) {
+    const logs = await this.getDecisionLogs(requestId);
+    return logs.some((log) => {
+      const reason = parseJsonObject(log.reason);
+      return reason.layer === 'timeout' || reason.eventType === 'PermissionCheckTimeout';
+    });
   }
 
   private buildRequestMetadata(request: PermissionCheckRequest, trace: PermissionTrace[]) {
@@ -148,6 +389,8 @@ export class PermissionService {
       initiatingAgentId: request.agentId || null,
       initiatingSkillId: request.skillId || null,
       toolName: request.toolName || null,
+      askTimeoutMs: this.resolveAskTimeoutMs(request.action, request.target),
+      riskLevel: this.getPermissionRisk(request.action, request.target),
       policySourceSummary: matchedPolicies.length > 0 ? matchedPolicies.join(', ') : 'default',
       trace: trace.map((entry) => ({
         layer: entry.layer,
@@ -231,7 +474,7 @@ export class PermissionService {
   }
 
   private buildRequestDetails(request: any, logs: any[]) {
-    const trace = logs.map((log) => {
+    const rawTrace = logs.map((log) => {
       const reason = parseJsonObject(log.reason);
       return {
         layer: reason.layer || (log.policyId ? 'policy' : 'default'),
@@ -239,6 +482,17 @@ export class PermissionService {
         policyName: reason.policyName || null,
         reason: reason.reason || null
       };
+    });
+
+    const traceKeySet = new Set<string>();
+    const trace = rawTrace.filter((entry) => {
+      const key = `${entry.layer}|${entry.decision}|${entry.policyName || ''}|${entry.reason || ''}`;
+      if (traceKeySet.has(key)) {
+        return false;
+      }
+
+      traceKeySet.add(key);
+      return true;
     });
 
     const firstReason = logs.length > 0 ? parseJsonObject(logs[0].reason) : {};
@@ -251,9 +505,33 @@ export class PermissionService {
       initiatingAgentId: firstReason.initiatingAgentId || null,
       initiatingSkillId: firstReason.initiatingSkillId || null,
       toolName: firstReason.toolName || null,
+      askTimeoutMs: firstReason.askTimeoutMs || null,
+      riskLevel: firstReason.riskLevel || null,
       policySourceSummary: policySources.length > 0 ? policySources.join(', ') : 'default',
       trace,
-      summary: `${request.action} ${request.target}`
+      summary: `${request.action} ${request.target}`,
+      minimalFactSummary: null
+    };
+  }
+
+  private async buildMinimalFactSummary(taskId: string, action: PermissionAction, target: string) {
+    const task = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+    if (!task) {
+      return {
+        taskId,
+        status: 'unknown',
+        triggerReason: null,
+        impactScope: target,
+        pendingAction: `${action} ${target}`
+      };
+    }
+
+    return {
+      taskId: task.id,
+      status: task.status,
+      triggerReason: task.triggerDecisionSummary || task.lastTriggerEvaluationSummary || null,
+      impactScope: task.intakeInputSummary || target,
+      pendingAction: `${action} ${target}`
     };
   }
 
@@ -261,6 +539,7 @@ export class PermissionService {
     const id = uuidv4();
     const createdAt = new Date();
     const metadata = this.buildRequestMetadata(request, trace);
+    const minimalFactSummary = await this.buildMinimalFactSummary(request.taskId, request.action, request.target);
     await db.insert(permissionRequests).values({
       id,
       taskId: request.taskId,
@@ -275,6 +554,19 @@ export class PermissionService {
     await this.recordPermissionTrace(id, request, trace);
     await this.setTaskPermissionState(request.taskId, 'pending', `等待权限确认: ${request.action} ${request.target}`, trace);
 
+    await taskService.addEvent(request.taskId, 'PermissionCheckRequested', '权限请求已创建，等待确认', {
+      requestId: id,
+      action: request.action,
+      target: request.target,
+      policyMode: PermissionDecision.ASK,
+      decisionTraceSummary: trace.map((entry) => ({
+        layer: entry.layer,
+        decision: entry.decision,
+        policyName: entry.policy?.name || null
+      })),
+      minimalFactSummary
+    });
+
     broadcastPermissionRequest(id, {
       id,
       taskId: request.taskId,
@@ -284,6 +576,7 @@ export class PermissionService {
       description: `请求${request.action}操作: ${request.target}`,
       status: 'pending',
       createdAt,
+      minimalFactSummary,
       ...metadata
     });
 
@@ -291,13 +584,21 @@ export class PermissionService {
   }
 
   async getPermissionRequests(status?: string) {
+    await this.handleTimedOutRequests();
+
     const query = db.select().from(permissionRequests).orderBy(asc(permissionRequests.createdAt));
 
     const requests = status
       ? await query.where(eq(permissionRequests.status, status))
       : await query;
 
-    return Promise.all(requests.map(async (request) => this.buildRequestDetails(request, await this.getDecisionLogs(request.id))));
+    return Promise.all(requests.map(async (request) => {
+      const details = this.buildRequestDetails(request, await this.getDecisionLogs(request.id));
+      return {
+        ...details,
+        minimalFactSummary: await this.buildMinimalFactSummary(request.taskId, request.action as PermissionAction, request.target)
+      };
+    }));
   }
 
   async getPermissionRequest(id: string) {
@@ -306,8 +607,16 @@ export class PermissionService {
     });
   }
 
-  async approvePermissionRequest(id: string, decidedBy: string, reason?: string) {
+  async approvePermissionRequest(id: string, decidedBy: string, reason?: string): Promise<{ taskId?: string; changed: boolean }> {
     const request = await this.getPermissionRequest(id);
+    if (!request) {
+      return { changed: false };
+    }
+
+    if (request.status !== 'pending') {
+      return { taskId: request.taskId, changed: false };
+    }
+
     await db.update(permissionRequests)
       .set({
         status: 'approved',
@@ -321,19 +630,29 @@ export class PermissionService {
       id: uuidv4(),
       requestId: id,
       policyId: null,
-      action: request?.action || 'approve',
+      action: request.action,
       decision: 'approved',
       reason: JSON.stringify({ decidedBy, reason: reason || null, layer: 'user_confirmation' }),
       createdAt: new Date()
     });
 
-    if (request?.taskId) {
-      await this.setTaskPermissionState(request.taskId, 'approved', `权限已批准: ${request.action} ${request.target}`);
-    }
+    await this.setTaskPermissionState(request.taskId, 'approved', `权限已批准: ${request.action} ${request.target}`);
+    await taskService.addEvent(request.taskId, 'PermissionGranted', '权限请求已批准', {
+      requestId: id,
+      action: request.action,
+      target: request.target,
+      decidedBy,
+      reason: reason || null
+    });
+
+    return { taskId: request.taskId, changed: true };
   }
 
   async denyPermissionRequest(id: string, decidedBy: string, reason?: string) {
     const request = await this.getPermissionRequest(id);
+    if (!request) {
+      return;
+    }
     await db.update(permissionRequests)
       .set({
         status: 'denied',
@@ -347,15 +666,20 @@ export class PermissionService {
       id: uuidv4(),
       requestId: id,
       policyId: null,
-      action: request?.action || 'reject',
+      action: request.action,
       decision: 'denied',
       reason: JSON.stringify({ decidedBy, reason: reason || null, layer: 'user_confirmation' }),
       createdAt: new Date()
     });
 
-    if (request?.taskId) {
-      await this.setTaskPermissionState(request.taskId, 'denied', `权限已拒绝: ${request.action} ${request.target}`);
-    }
+    await this.setTaskPermissionState(request.taskId, 'denied', `权限已拒绝: ${request.action} ${request.target}`);
+    await taskService.addEvent(request.taskId, 'PermissionDenied', '权限请求已拒绝', {
+      requestId: id,
+      action: request.action,
+      target: request.target,
+      decidedBy,
+      reason: reason || null
+    });
   }
 
   async getTaskPermissionSummary(taskId: string) {

@@ -17,3 +17,6 @@ export { toolService } from './tools.js';
 export { agentQueueService } from './queue.js';
 export { memoryConsolidationService } from './memory.js';
 export { inputNormalizationService } from './normalization.js';
+export { taskOutputService } from './output.js';
+export { taskProjectionService } from './projection.js';
+export { skillToolRoutingService } from './skill-routing.js';

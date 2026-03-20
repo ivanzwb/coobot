@@ -1,4 +1,5 @@
-import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
+import { sqliteTable, text, integer, real, check } from 'drizzle-orm/sqlite-core';
 
 export const conversations = sqliteTable('conversations', {
   id: text('id').primaryKey(),
@@ -30,6 +31,7 @@ export const tasks = sqliteTable('tasks', {
   parentTaskId: text('parent_task_id'),
   conversationId: text('conversation_id').notNull().references(() => conversations.id),
   status: text('status').notNull().default('pending'),
+  blocking: text('blocking').default('blocking'),
   triggerMode: text('trigger_mode').notNull().default('immediate'),
   triggerStatus: text('trigger_status').default('ready'),
   scheduledAt: integer('scheduled_at', { mode: 'timestamp' }),
@@ -77,6 +79,11 @@ export const tasks = sqliteTable('tasks', {
   memoryLoadSummary: text('memory_load_summary'),
   memoryWriteSummary: text('memory_write_summary'),
   aggregateVersion: text('aggregate_version'),
+  planRevision: integer('plan_revision').default(1),
+  replanCount: integer('replan_count').default(0),
+  latestPlanSummary: text('latest_plan_summary'),
+  goalSatisfactionStatus: text('goal_satisfaction_status'),
+  goalSatisfactionSummary: text('goal_satisfaction_summary'),
   pendingWriteCommandCount: integer('pending_write_command_count').default(0),
   lastAcceptedWriteCommandId: text('last_accepted_write_command_id'),
   lastEventSequence: integer('last_event_sequence').default(0),
@@ -163,7 +170,6 @@ export const agents = sqliteTable('agents', {
   id: text('id').primaryKey(),
   type: text('type').notNull(),
   name: text('name').notNull(),
-  role: text('role'),
   model: text('model').notNull(),
   temperature: real('temperature').default(0.7),
   maxTokens: integer('max_tokens'),
@@ -179,6 +185,8 @@ export const skills = sqliteTable('skills', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
   description: text('description'),
+  runtimeLanguage: text('runtime_language'),
+  version: text('version').default('v1.0.0'),
   status: text('status').notNull().default('active'),
   permissions: text('permissions'),
   tools: text('tools'),
@@ -195,6 +203,18 @@ export const knowledgeDocuments = sqliteTable('knowledge_documents', {
   sourceType: text('source_type').notNull(),
   sourceTaskId: text('source_task_id'),
   agentId: text('agent_id'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
+});
+
+export const knowledgeImportHistory = sqliteTable('knowledge_import_history', {
+  id: text('id').primaryKey(),
+  fileName: text('file_name').notNull(),
+  mimeType: text('mime_type'),
+  agentId: text('agent_id'),
+  status: text('status').notNull().default('processing'),
+  message: text('message'),
+  documentId: text('document_id').references(() => knowledgeDocuments.id),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
 });
@@ -341,6 +361,7 @@ export const modelCallLogs = sqliteTable('model_call_logs', {
   taskId: text('task_id').references(() => tasks.id),
   stepId: text('step_id'),
   agentId: text('agent_id'),
+  provider: text('provider').notNull(),
   model: text('model').notNull(),
   promptTokens: integer('prompt_tokens'),
   completionTokens: integer('completion_tokens'),
@@ -348,6 +369,9 @@ export const modelCallLogs = sqliteTable('model_call_logs', {
   duration: integer('duration'),
   status: text('status').notNull(),
   error: text('error'),
+  idempotencyKey: text('idempotency_key'),
+  retryCount: integer('retry_count').default(0),
+  fallbackProvider: text('fallback_provider'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
 });
 
@@ -380,4 +404,72 @@ export const attachmentEvents = sqliteTable('attachment_events', {
   eventType: text('event_type').notNull(),
   details: text('details'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
+});
+
+export const promptTemplates = sqliteTable('prompt_templates', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  type: text('type').notNull(),
+  description: text('description'),
+  currentVersion: integer('current_version').notNull().default(1),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
+}, (table) => ({
+  promptTemplateTypeCheck: check('prompt_templates_type_check', sql`${table.type} in ('leader', 'domain')`)
+}));
+
+export const promptVersions = sqliteTable('prompt_versions', {
+  id: text('id').primaryKey(),
+  templateId: text('template_id').notNull().references(() => promptTemplates.id),
+  version: integer('version').notNull(),
+  system: text('system'),
+  developer: text('developer'),
+  user: text('user'),
+  context: text('context'),
+  toolResult: text('tool_result'),
+  slots: text('slots'),
+  changeLog: text('change_log'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
+});
+
+export const agentPromptProfiles = sqliteTable('agent_prompt_profiles', {
+  id: text('id').primaryKey(),
+  agentId: text('agent_id').notNull().references(() => agents.id),
+  templateId: text('template_id').references(() => promptTemplates.id),
+  templateVersion: integer('template_version'),
+  roleDefinition: text('role_definition'),
+  behaviorNorm: text('behavior_norm'),
+  capabilityBoundary: text('capability_boundary'),
+  customSlots: text('custom_slots'),
+  version: integer('version').notNull().default(1),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
+});
+
+export const promptMigrationRecords = sqliteTable('prompt_migration_records', {
+  id: text('id').primaryKey(),
+  agentId: text('agent_id').notNull().references(() => agents.id),
+  fromTemplateId: text('from_template_id').references(() => promptTemplates.id),
+  fromVersion: integer('from_version'),
+  toTemplateId: text('to_template_id').references(() => promptTemplates.id),
+  toVersion: integer('to_version'),
+  status: text('status').notNull(),
+  compatibilityResult: text('compatibility_result'),
+  slotMappings: text('slot_mappings'),
+  conflicts: text('conflicts'),
+  errorMessage: text('error_message'),
+  migratedAt: integer('migrated_at', { mode: 'timestamp' }),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
+});
+
+export const agentSkillPermissionBindings = sqliteTable('agent_skill_permission_bindings', {
+  id: text('id').primaryKey(),
+  agentId: text('agent_id').notNull().references(() => agents.id),
+  skillId: text('skill_id').notNull().references(() => skills.id),
+  toolName: text('tool_name').notNull(),
+  readAction: text('read_action').notNull().default('ask'),
+  writeAction: text('write_action').notNull().default('ask'),
+  executeAction: text('execute_action').notNull().default('ask'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
 });

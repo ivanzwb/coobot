@@ -1,8 +1,7 @@
 import { knowledgeService } from './knowledge.js';
-import { conversationService } from './conversation.js';
 import { db } from '../db/index.js';
 import { conversations, messages, memoryEntries } from '../db/schema.js';
-import { eq, and, gte, asc, desc } from 'drizzle-orm';
+import { eq, and, gte, lte, desc } from 'drizzle-orm';
 import { MemoryType, Importance } from '../types/index.js';
 
 export interface ConsolidationResult {
@@ -25,40 +24,62 @@ export interface DailyConsolidationRecord {
 
 export class MemoryConsolidationService {
   async consolidateDailyMemories(agentId?: string): Promise<ConsolidationResult> {
-    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    
+    const now = new Date();
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(now);
+    endOfDay.setHours(23, 59, 59, 999);
+
     const conversationList = await db.select()
       .from(conversations)
-      .where(gte(conversations.lastMessageAt, oneDayAgo));
+      .where(
+        and(
+          gte(conversations.lastMessageAt, startOfDay),
+          lte(conversations.lastMessageAt, endOfDay)
+        )
+      );
 
     let totalMessages = 0;
     let memoriesCreated = 0;
 
     for (const conversation of conversationList) {
-      const conversationMessages = await db.select()
-        .from(messages)
-        .where(eq(messages.conversationId, conversation.id));
+      try {
+        const conversationMessages = await db.select()
+          .from(messages)
+          .where(
+            and(
+              eq(messages.conversationId, conversation.id),
+              gte(messages.createdAt, startOfDay),
+              lte(messages.createdAt, endOfDay)
+            )
+          );
 
-      totalMessages += conversationMessages.length;
+        totalMessages += conversationMessages.length;
 
-      const userMessages = conversationMessages
-        .filter(m => m.role === 'user')
-        .map(m => m.content)
-        .filter(c => c.length > 10);
+        const userMessages = this.pickValuableUserMessages(conversationMessages.map((m) => ({
+          role: m.role,
+          content: m.content
+        })));
+        const summary = this.generateSummary(userMessages);
 
-      const summary = this.generateSummary(userMessages);
-
-      if (summary && userMessages.length > 0) {
-        await knowledgeService.addMemory({
-          agentId,
+        if (summary && userMessages.length > 0) {
+          const changed = await this.upsertDailyDigestMemory({
+            agentId,
+            conversationId: conversation.id,
+            digestDate: startOfDay,
+            summary,
+            content: `Digest[v1] ${startOfDay.toISOString().slice(0, 10)}: 会话包含 ${userMessages.length} 条有效用户消息`,
+            importance: this.determineImportance(summary)
+          });
+          if (changed) {
+            memoriesCreated++;
+          }
+        }
+      } catch (error) {
+        console.error('[MemoryConsolidation] conversation consolidate failed:', {
           conversationId: conversation.id,
-          type: MemoryType.PERSISTENT,
-          content: `会话包含 ${userMessages.length} 条用户消息`,
-          summary,
-          sourceType: 'daily_digest',
-          importance: this.determineImportance(summary)
+          error
         });
-        memoriesCreated++;
       }
     }
 
@@ -72,17 +93,54 @@ export class MemoryConsolidationService {
 
   private generateSummary(messages: string[]): string {
     if (messages.length === 0) return '';
-    
+
     const keywords = this.extractKeywords(messages);
     const topics = this.categorizeTopics(keywords);
-    
+
     return `讨论话题: ${topics.join(', ')}`;
+  }
+
+  private pickValuableUserMessages(messagesList: Array<{ role: string; content: string }>): string[] {
+    const lowValuePatterns = [
+      /^hi$/i,
+      /^hello$/i,
+      /^ok$/i,
+      /^好的?$/,
+      /^收到$/,
+      /^谢谢$/
+    ];
+
+    const dedup = new Set<string>();
+    const selected: string[] = [];
+
+    for (const message of messagesList) {
+      if (message.role !== 'user') {
+        continue;
+      }
+      const content = (message.content || '').trim();
+      if (content.length < 8) {
+        continue;
+      }
+      if (lowValuePatterns.some((pattern) => pattern.test(content))) {
+        continue;
+      }
+
+      const normalized = content.toLowerCase().replace(/\s+/g, ' ');
+      if (dedup.has(normalized)) {
+        continue;
+      }
+
+      dedup.add(normalized);
+      selected.push(content);
+    }
+
+    return selected;
   }
 
   private extractKeywords(messages: string[]): string[] {
     const allText = messages.join(' ');
     const words = allText.toLowerCase().split(/\s+/);
-    
+
     const stopWords = new Set([
       'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
       'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
@@ -99,7 +157,7 @@ export class MemoryConsolidationService {
     ]);
 
     const wordFreq = new Map<string, number>();
-    
+
     for (const word of words) {
       if (word.length > 2 && !stopWords.has(word)) {
         wordFreq.set(word, (wordFreq.get(word) || 0) + 1);
@@ -122,7 +180,7 @@ export class MemoryConsolidationService {
     };
 
     const matched: string[] = [];
-    
+
     for (const [category, terms] of Object.entries(categories)) {
       if (keywords.some(k => terms.includes(k))) {
         matched.push(category);
@@ -139,7 +197,7 @@ export class MemoryConsolidationService {
     if (highPriority.some(k => content.toLowerCase().includes(k))) {
       return Importance.HIGH;
     }
-    
+
     if (lowPriority.some(k => content.toLowerCase().includes(k))) {
       return Importance.LOW;
     }
@@ -151,7 +209,7 @@ export class MemoryConsolidationService {
     return db.select()
       .from(memoryEntries)
       .where(
-        agentId 
+        agentId
           ? and(eq(memoryEntries.agentId, agentId), eq(memoryEntries.sourceType, 'daily_digest'))
           : eq(memoryEntries.sourceType, 'daily_digest')
       )
@@ -159,19 +217,73 @@ export class MemoryConsolidationService {
       .limit(limit);
   }
 
+  private async upsertDailyDigestMemory(params: {
+    agentId?: string;
+    conversationId: string;
+    digestDate: Date;
+    summary: string;
+    content: string;
+    importance: Importance;
+  }): Promise<boolean> {
+    const start = new Date(params.digestDate);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(params.digestDate);
+    end.setHours(23, 59, 59, 999);
+
+    const conditions = [
+      eq(memoryEntries.sourceType, 'daily_digest'),
+      eq(memoryEntries.conversationId, params.conversationId),
+      gte(memoryEntries.createdAt, start),
+      lte(memoryEntries.createdAt, end)
+    ];
+    if (params.agentId) {
+      conditions.push(eq(memoryEntries.agentId, params.agentId));
+    }
+
+    const existingRows = await db.select()
+      .from(memoryEntries)
+      .where(and(...conditions))
+      .orderBy(desc(memoryEntries.createdAt))
+      .limit(1);
+
+    if (existingRows.length > 0) {
+      const existing = existingRows[0];
+      await db.update(memoryEntries)
+        .set({
+          content: params.content,
+          summary: params.summary,
+          importance: params.importance
+        })
+        .where(eq(memoryEntries.id, existing.id));
+      return false;
+    }
+
+    await knowledgeService.addMemory({
+      agentId: params.agentId,
+      conversationId: params.conversationId,
+      type: MemoryType.PERSISTENT,
+      content: params.content,
+      summary: params.summary,
+      sourceType: 'daily_digest',
+      importance: params.importance
+    });
+
+    return true;
+  }
+
   async rerunConsolidation(agentId?: string, date?: string): Promise<ConsolidationResult> {
     if (date) {
       const targetDate = new Date(date);
       return this.consolidateForDate(targetDate, agentId);
     }
-    
+
     return this.consolidateDailyMemories(agentId);
   }
 
   private async consolidateForDate(date: Date, agentId?: string): Promise<ConsolidationResult> {
     const startOfDay = new Date(date);
     startOfDay.setHours(0, 0, 0, 0);
-    
+
     const endOfDay = new Date(date);
     endOfDay.setHours(23, 59, 59, 999);
 
@@ -180,7 +292,7 @@ export class MemoryConsolidationService {
       .where(
         and(
           gte(conversations.lastMessageAt, startOfDay),
-          eq(conversations.lastMessageAt as any, endOfDay as any)
+          lte(conversations.lastMessageAt, endOfDay)
         )
       );
 
@@ -199,23 +311,24 @@ export class MemoryConsolidationService {
 
       totalMessages += conversationMessages.length;
 
-      const userMessages = conversationMessages
-        .filter(m => m.role === 'user')
-        .map(m => m.content);
+      const userMessages = this.pickValuableUserMessages(
+        conversationMessages.map((m) => ({ role: m.role, content: m.content }))
+      );
 
       const summary = this.generateSummary(userMessages);
 
       if (summary) {
-        await knowledgeService.addMemory({
+        const changed = await this.upsertDailyDigestMemory({
           agentId,
           conversationId: conversation.id,
-          type: MemoryType.PERSISTENT,
-          content: summary,
-          summary: `${date.toLocaleDateString()} 会话摘要`,
-          sourceType: 'daily_digest',
+          digestDate: startOfDay,
+          summary: `${date.toLocaleDateString()} 会话摘要: ${summary}`,
+          content: `Digest[v1] ${date.toISOString().slice(0, 10)}: ${summary}`,
           importance: Importance.MEDIUM
         });
-        memoriesCreated++;
+        if (changed) {
+          memoriesCreated++;
+        }
       }
     }
 

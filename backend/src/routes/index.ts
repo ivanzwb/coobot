@@ -4,16 +4,20 @@ import config from 'config';
 import os from 'node:os';
 import path from 'node:path';
 import { statfs } from 'node:fs/promises';
-import { conversationService, taskService, attachmentService, agentService, knowledgeService, permissionService, llmAdapter, memoryConsolidationService, agentQueueService, skillInvocationService } from '../services/index.js';
-import { TaskStatus, TriggerMode } from '../types/index.js';
+import { conversationService, taskService, attachmentService, agentService, knowledgeService, permissionService, llmAdapter, memoryConsolidationService, agentQueueService, skillInvocationService, schedulerService, taskOutputService, taskProjectionService, promptService, orchestrationService } from '../services/index.js';
+import { AgentType, TaskStatus, TriggerMode } from '../types/index.js';
 import { db } from '../db/index.js';
 import { parseConversationInput } from '../services/conversation-command.js';
-import { buildTaskReport } from '../services/report.js';
-import { agentParticipations, knowledgeDocuments, knowledgeHitLogs, memoryEntries, modelCallLogs, taskMemoryLinks, tasks, toolInvocationLogs } from '../db/schema.js';
-import { desc, eq, inArray } from 'drizzle-orm';
+import { buildTaskReport, TaskEventInput, TaskOutputInput, TaskStepInput } from '../services/report.js';
+import { memoryEntries, modelCallLogs, tasks } from '../db/schema.js';
+import { eq } from 'drizzle-orm';
+import promptRouter from './prompt.js';
+import { PromptTemplateTypeMismatchError } from '../services/prompt.js';
 
 const router = Router();
 export { router };
+
+router.use('/api/prompts', promptRouter);
 
 function requireClientContext(req: any, res: any) {
   const clientId = req.headers['x-client-id'] as string | undefined;
@@ -59,6 +63,73 @@ function formatTaskCommandReply(task: any, summary: string, extraActions?: strin
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resumeTaskAfterPermissionApproval(taskId?: string | null) {
+  if (!taskId) {
+    return;
+  }
+
+  void orchestrationService.executeTask(taskId).catch((error: any) => {
+    console.error('[PermissionResume] Failed to resume task after approval', {
+      taskId,
+      error: error?.message || String(error)
+    });
+  });
+}
+
+function buildCursorFromQuery(taskId: string, cursorRaw: unknown, fromSequenceRaw: unknown) {
+  const cursor = typeof cursorRaw === 'string' && cursorRaw.trim().length > 0
+    ? cursorRaw.trim()
+    : null;
+  if (cursor) {
+    return cursor;
+  }
+
+  const fromSequence = Number(fromSequenceRaw);
+  if (!Number.isFinite(fromSequence) || fromSequence < 0) {
+    return undefined;
+  }
+
+  return taskService.buildEventCursor(taskId, fromSequence, 0);
+}
+
+function normalizePossibleMojibakeFileName(fileName: string): string {
+  if (!fileName) {
+    return fileName;
+  }
+
+  if (/[\u4e00-\u9fff]/.test(fileName)) {
+    return fileName;
+  }
+
+  if (!/[\u00C0-\u00FF]/.test(fileName)) {
+    return fileName;
+  }
+
+  const decoded = Buffer.from(fileName, 'latin1').toString('utf8');
+  if (/[\u4e00-\u9fff]/.test(decoded)) {
+    return decoded;
+  }
+
+  return fileName;
+}
+
+function normalizeSkillRuntimeLanguage(value: unknown): 'javascript' | 'python' | 'ruby' | 'bash' | 'powershell' | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'node') {
+    return 'javascript';
+  }
+
+  if (['javascript', 'python', 'ruby', 'bash', 'powershell'].includes(normalized)) {
+    return normalized as 'javascript' | 'python' | 'ruby' | 'bash' | 'powershell';
+  }
+
+  return undefined;
 }
 
 function toCpuTotals(cpus: os.CpuInfo[]) {
@@ -239,18 +310,124 @@ async function buildMonitoringSnapshot() {
 }
 
 router.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    version: '1.0.0'
-  });
+  const buildResponse = async () => {
+    const checks: Record<string, any> = {
+      database: { status: 'unknown', metric: null, threshold: 'must be reachable' },
+      llm: { status: 'unknown', metric: null, threshold: 'default model should be reachable' },
+      disk: { status: 'unknown', metric: null, threshold: 'usage < 95%' },
+      scheduler: { status: 'unknown', metric: null, threshold: 'scheduler running = true' },
+      queueBacklog: { status: 'unknown', metric: null, threshold: 'waiting subscriptions should be monitored' }
+    };
+
+    try {
+      const dbStart = Date.now();
+      await db.select().from('sqlite_master' as any).limit(1);
+      checks.database = {
+        status: 'healthy',
+        metric: { latencyMs: Date.now() - dbStart },
+        threshold: 'must be reachable'
+      };
+    } catch (error: any) {
+      checks.database = {
+        status: 'unhealthy',
+        metric: { error: error?.message || String(error) },
+        threshold: 'must be reachable'
+      };
+    }
+
+    try {
+      const llmReachable = await llmAdapter.testConnection();
+      checks.llm = {
+        status: llmReachable ? 'healthy' : 'degraded',
+        metric: { reachable: llmReachable },
+        threshold: 'default model should be reachable'
+      };
+    } catch (error: any) {
+      checks.llm = {
+        status: 'degraded',
+        metric: { error: error?.message || String(error) },
+        threshold: 'default model should be reachable'
+      };
+    }
+
+    try {
+      const usagePercent = await sampleDiskUsagePercent();
+      checks.disk = {
+        status: usagePercent >= 95 ? 'unhealthy' : usagePercent >= 85 ? 'degraded' : 'healthy',
+        metric: { usagePercent },
+        threshold: 'usage < 95%'
+      };
+    } catch (error: any) {
+      checks.disk = {
+        status: 'degraded',
+        metric: { error: error?.message || String(error) },
+        threshold: 'usage < 95%'
+      };
+    }
+
+    try {
+      const scheduler = schedulerService.getStatus();
+      checks.scheduler = {
+        status: scheduler.running ? 'healthy' : 'unhealthy',
+        metric: scheduler,
+        threshold: 'scheduler running = true'
+      };
+    } catch (error: any) {
+      checks.scheduler = {
+        status: 'unhealthy',
+        metric: { error: error?.message || String(error) },
+        threshold: 'scheduler running = true'
+      };
+    }
+
+    try {
+      const activeSubscriptions = await taskService.getActiveWaitSubscriptions();
+      checks.queueBacklog = {
+        status: 'healthy',
+        metric: {
+          waitingSubscriptions: activeSubscriptions.length
+        },
+        threshold: 'waiting subscriptions should be monitored'
+      };
+    } catch (error: any) {
+      checks.queueBacklog = {
+        status: 'degraded',
+        metric: { error: error?.message || String(error) },
+        threshold: 'waiting subscriptions should be monitored'
+      };
+    }
+
+    const degradedExists = Object.values(checks).some((item: any) => item.status === 'degraded');
+    const unhealthyExists = Object.values(checks).some((item: any) => item.status === 'unhealthy');
+    const status = unhealthyExists ? 'unhealthy' : degradedExists ? 'degraded' : 'healthy';
+
+    return {
+      status,
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      version: '1.0.0',
+      checks
+    };
+  };
+
+  buildResponse()
+    .then((payload) => res.json(payload))
+    .catch((error: any) => {
+      res.status(500).json({
+        status: 'unhealthy',
+        error: {
+          code: 'HEALTH_BUILD_FAILED',
+          message: error?.message || 'Failed to build health status'
+        }
+      });
+    });
 });
 
 router.get('/health/ready', async (req, res) => {
   const checks = {
     database: false,
-    llm: false
+    llm: false,
+    scheduler: false
   };
 
   try {
@@ -266,9 +443,15 @@ router.get('/health/ready', async (req, res) => {
     console.error('LLM check failed:', e);
   }
 
-  const ready = checks.database;
+  try {
+    checks.scheduler = schedulerService.getStatus().running;
+  } catch (e) {
+    console.error('Scheduler check failed:', e);
+  }
 
-  res.json({
+  const ready = checks.database && checks.scheduler;
+
+  res.status(ready ? 200 : 503).json({
     ready,
     checks,
     timestamp: new Date().toISOString()
@@ -331,8 +514,12 @@ router.get('/api/conversation', async (req, res) => {
   }
 });
 
-router.get('/api/conversation/:id', async (req, res) => {
+router.get('/api/conversation/:id', async (req, res, next) => {
   try {
+    if (req.params.id === 'messages') {
+      return next();
+    }
+
     const clientContext = requireClientContext(req, res);
     if (!clientContext) {
       return;
@@ -422,7 +609,10 @@ router.post('/api/conversation/messages', async (req, res) => {
 
         if (request) {
           if (parsedInput.command === 'approve_permission') {
-            await permissionService.approvePermissionRequest(request.id, clientContext.clientId, '会话自然语言批准');
+            const approveResult = await permissionService.approvePermissionRequest(request.id, clientContext.clientId, '会话自然语言批准');
+            if (approveResult.changed) {
+              resumeTaskAfterPermissionApproval(approveResult.taskId || request.taskId);
+            }
             assistantContent = `已批准权限请求 ${request.id.slice(0, 12)}。\n动作: ${request.action}\n目标: ${request.target}`;
           } else {
             await permissionService.denyPermissionRequest(request.id, clientContext.clientId, '会话自然语言拒绝');
@@ -676,6 +866,24 @@ router.get('/api/tasks/:id/steps', async (req, res) => {
   }
 });
 
+router.get('/api/tasks/:id/execution-view', async (req, res) => {
+  try {
+    const clientContext = requireClientContext(req, res);
+    if (!clientContext) {
+      return;
+    }
+
+    const view = await taskProjectionService.getVisibleTaskExecutionView(req.params.id, clientContext.clientId);
+    if (!view) {
+      return res.status(404).json({ error: { code: 'TASK_NOT_FOUND', message: '任务不存在' } });
+    }
+
+    res.json(view);
+  } catch (error: any) {
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
+  }
+});
+
 router.get('/api/tasks/:id/events', async (req, res) => {
   try {
     const clientContext = requireClientContext(req, res);
@@ -684,7 +892,8 @@ router.get('/api/tasks/:id/events', async (req, res) => {
     }
 
     const limit = parseInt(req.query.limit as string) || 100;
-    const events = await taskService.getVisibleTaskEvents(req.params.id, clientContext.clientId, limit, req.query.cursor as string);
+    const cursor = buildCursorFromQuery(req.params.id, req.query.cursor, req.query.fromSequence);
+    const events = await taskService.getVisibleTaskEvents(req.params.id, clientContext.clientId, limit, cursor);
     res.json(events);
   } catch (error: any) {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
@@ -703,7 +912,7 @@ router.get('/api/tasks/:id/output', async (req, res) => {
       return res.status(404).json({ error: { code: 'TASK_NOT_FOUND', message: '任务不存在' } });
     }
 
-    const outputs = await taskService.getOutputs(req.params.id);
+    const outputs = await taskOutputService.getOutputs(req.params.id);
     res.json(outputs);
   } catch (error: any) {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
@@ -741,12 +950,64 @@ router.get('/api/agents', async (req, res) => {
 
 router.post('/api/agents', async (req, res) => {
   try {
-    const { name, type, role, model, temperature, skills, knowledgeBases } = req.body;
+    const {
+      name,
+      model,
+      temperature,
+      skills,
+      skillPermissionBindings,
+      knowledgeBases,
+      promptProfile,
+      type: requestedType
+    } = req.body || {};
+
+    if (requestedType && requestedType !== AgentType.DOMAIN) {
+      return res.status(400).json({
+        error: {
+          code: 'AGENT_CREATE_TYPE_FORBIDDEN',
+          message: '创建 Agent 仅允许 Domain 类型'
+        }
+      });
+    }
+
     const agentId = await agentService.createAgent({
-      name, type, role, model, temperature, skills, knowledgeBases
+      name,
+      type: AgentType.DOMAIN,
+      model,
+      temperature,
+      skills,
+      knowledgeBases
     });
+
+    if (Array.isArray(skillPermissionBindings)) {
+      await agentService.replaceAgentSkillPermissionBindings(agentId, skillPermissionBindings);
+    }
+
+    if (promptProfile && typeof promptProfile === 'object') {
+      const templateId = typeof promptProfile.templateId === 'string' ? promptProfile.templateId : undefined;
+      const templateVersion = typeof promptProfile.templateVersion === 'number' ? promptProfile.templateVersion : undefined;
+
+      if (templateId && templateVersion) {
+        await promptService.createAgentPromptProfile(agentId, {
+          templateId,
+          templateVersion,
+          roleDefinition: '遵循模板角色定义',
+          behaviorNorm: '遵循模板约束输出',
+          capabilityBoundary: '仅在授权边界内执行'
+        });
+      }
+    }
+
     res.json({ agentId });
   } catch (error: any) {
+    if (error instanceof PromptTemplateTypeMismatchError) {
+      return res.status(400).json({
+        error: {
+          code: error.code,
+          message: error.message
+        }
+      });
+    }
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   }
 });
@@ -765,9 +1026,69 @@ router.get('/api/agents/:id', async (req, res) => {
 
 router.patch('/api/agents/:id', async (req, res) => {
   try {
-    await agentService.updateAgent(req.params.id, req.body);
+    const {
+      promptProfile,
+      skillPermissionBindings,
+      type: requestedType,
+      ...agentUpdates
+    } = req.body || {};
+
+    const existingAgent = await agentService.getAgent(req.params.id);
+    if (!existingAgent) {
+      return res.status(404).json({
+        error: {
+          code: 'AGENT_NOT_FOUND',
+          message: 'Agent 不存在'
+        }
+      });
+    }
+
+    if (requestedType !== undefined && requestedType !== existingAgent.type) {
+      return res.status(400).json({
+        error: {
+          code: 'AGENT_TYPE_IMMUTABLE',
+          message: 'Agent 类型创建后不可修改'
+        }
+      });
+    }
+
+    await agentService.updateAgent(req.params.id, agentUpdates);
+
+    if (Array.isArray(skillPermissionBindings)) {
+      await agentService.replaceAgentSkillPermissionBindings(req.params.id, skillPermissionBindings);
+    }
+
+    if (promptProfile && typeof promptProfile === 'object') {
+      const existingProfile = await promptService.getAgentPromptProfile(req.params.id);
+      const templateId = typeof promptProfile.templateId === 'string' ? promptProfile.templateId : undefined;
+      const templateVersion = typeof promptProfile.templateVersion === 'number' ? promptProfile.templateVersion : undefined;
+
+      if (existingProfile) {
+        await promptService.updateAgentPromptProfile(req.params.id, {
+          templateId,
+          templateVersion
+        });
+      } else if (templateId && templateVersion) {
+        await promptService.createAgentPromptProfile(req.params.id, {
+          templateId,
+          templateVersion,
+          roleDefinition: '遵循模板角色定义',
+          behaviorNorm: '遵循模板约束输出',
+          capabilityBoundary: '仅在授权边界内执行'
+        });
+      }
+    }
+
     res.json({ success: true });
   } catch (error: any) {
+    if (error instanceof PromptTemplateTypeMismatchError) {
+      return res.status(400).json({
+        error: {
+          code: error.code,
+          message: error.message
+        }
+      });
+    }
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   }
 });
@@ -777,6 +1098,91 @@ router.delete('/api/agents/:id', async (req, res) => {
     await agentService.deleteAgent(req.params.id);
     res.json({ success: true });
   } catch (error: any) {
+    if (error?.code === 'AGENT_HAS_RUNNING_TASK_REFERENCES') {
+      const references = Array.isArray(error?.references) ? error.references : [];
+      const referenceMessage = references
+        .map((item: any) => {
+          const summary = typeof item?.intakeInputSummary === 'string' && item.intakeInputSummary.trim().length > 0
+            ? item.intakeInputSummary.trim()
+            : '无摘要';
+          return `${item?.taskId || 'unknown'}(${item?.status || 'unknown'}, ${item?.matchedBy || 'unknown'}): ${summary}`;
+        })
+        .join('; ');
+
+      return res.status(409).json({
+        error: {
+          code: 'AGENT_HAS_RUNNING_TASK_REFERENCES',
+          message: referenceMessage
+            ? `当前 Agent 被运行中任务引用，无法删除。引用任务: ${referenceMessage}`
+            : '当前 Agent 被运行中任务引用，无法删除。'
+        },
+        references
+      });
+    }
+
+    if (error?.code === 'LEADER_AGENT_DELETE_FORBIDDEN') {
+      return res.status(400).json({
+        error: {
+          code: 'LEADER_AGENT_DELETE_FORBIDDEN',
+          message: 'Leader Agent 不可删除'
+        }
+      });
+    }
+
+    if (error?.code === 'AGENT_NOT_FOUND') {
+      return res.status(404).json({
+        error: {
+          code: 'AGENT_NOT_FOUND',
+          message: 'Agent 不存在'
+        }
+      });
+    }
+
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
+  }
+});
+
+router.post('/api/agents/:id/deactivate', async (req, res) => {
+  try {
+    await agentService.deactivateAgent(req.params.id);
+    res.json({ success: true });
+  } catch (error: any) {
+    if (error?.code === 'LEADER_AGENT_DEACTIVATE_FORBIDDEN') {
+      return res.status(400).json({
+        error: {
+          code: 'LEADER_AGENT_DEACTIVATE_FORBIDDEN',
+          message: 'Leader Agent 不可停职'
+        }
+      });
+    }
+
+    if (error?.code === 'AGENT_NOT_FOUND') {
+      return res.status(404).json({
+        error: {
+          code: 'AGENT_NOT_FOUND',
+          message: 'Agent 不存在'
+        }
+      });
+    }
+
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
+  }
+});
+
+router.post('/api/agents/:id/activate', async (req, res) => {
+  try {
+    await agentService.activateAgent(req.params.id);
+    res.json({ success: true });
+  } catch (error: any) {
+    if (error?.code === 'AGENT_NOT_FOUND') {
+      return res.status(404).json({
+        error: {
+          code: 'AGENT_NOT_FOUND',
+          message: 'Agent 不存在'
+        }
+      });
+    }
+
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   }
 });
@@ -792,8 +1198,26 @@ router.get('/api/skills', async (req, res) => {
 
 router.post('/api/skills', async (req, res) => {
   try {
-    const { name, description, instructions, permissions, tools } = req.body;
-    const skillId = await agentService.createSkill({ name, description, instructions, permissions, tools });
+    const { name, description, instructions, permissions, tools, runtimeLanguage, version } = req.body;
+    const normalizedRuntimeLanguage = normalizeSkillRuntimeLanguage(runtimeLanguage);
+    if (runtimeLanguage !== undefined && runtimeLanguage !== null && String(runtimeLanguage).trim() !== '' && !normalizedRuntimeLanguage) {
+      return res.status(400).json({
+        error: {
+          code: 'SKILL_RUNTIME_LANGUAGE_INVALID',
+          message: 'runtimeLanguage 取值无效'
+        }
+      });
+    }
+
+    const skillId = await agentService.createSkill({
+      name,
+      description,
+      instructions,
+      permissions,
+      tools,
+      runtimeLanguage: normalizedRuntimeLanguage,
+      version
+    });
     res.json({ skillId });
   } catch (error: any) {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
@@ -833,6 +1257,91 @@ router.post('/api/knowledge', async (req, res) => {
   }
 });
 
+router.post('/api/knowledge/upload', async (req, res) => {
+  try {
+    if (!req.files) {
+      return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '请上传文件' } });
+    }
+
+    const files = req.files as { [key: string]: fileUpload.UploadedFile | fileUpload.UploadedFile[] };
+    const rawFile = files.file || files.files || Object.values(files)[0];
+    const uploadFiles = (Array.isArray(rawFile) ? rawFile : [rawFile]).filter((file) => Boolean(file?.data));
+
+    if (uploadFiles.length === 0) {
+      return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: '文件内容为空' } });
+    }
+
+    const agentId = typeof req.body.agentId === 'string' ? req.body.agentId : undefined;
+    const items = await Promise.all(uploadFiles.map(async (file) => {
+      const normalizedFileName = normalizePossibleMojibakeFileName(file.name);
+
+      try {
+        const result = await knowledgeService.importDocumentFromUpload({
+          fileName: normalizedFileName,
+          mimeType: file.mimetype,
+          buffer: file.data,
+          agentId
+        });
+
+        return {
+          status: 'success' as const,
+          ...result,
+          fileName: result.fileName || normalizedFileName
+        };
+      } catch (error: any) {
+        return {
+          fileName: normalizedFileName,
+          status: 'failed' as const,
+          error: error?.message || '导入失败'
+        };
+      }
+    }));
+
+    const successCount = items.filter((item) => item.status === 'success').length;
+    const failedCount = items.length - successCount;
+
+    if (items.length === 1) {
+      if (items[0].status === 'success') {
+        return res.json(items[0]);
+      }
+
+      return res.status(207).json({
+        total: 1,
+        successCount: 0,
+        failedCount: 1,
+        items
+      });
+    }
+
+    return res.status(failedCount > 0 ? 207 : 200).json({
+      total: items.length,
+      successCount,
+      failedCount,
+      items
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
+  }
+});
+
+router.patch('/api/knowledge/:id/title', async (req, res) => {
+  try {
+    const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+    if (!title) {
+      return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: 'title 不能为空' } });
+    }
+
+    const updated = await knowledgeService.updateDocumentTitle(req.params.id, title);
+    if (!updated) {
+      return res.status(404).json({ error: { code: 'KNOWLEDGE_NOT_FOUND', message: '知识文档不存在' } });
+    }
+
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
+  }
+});
+
 router.post('/api/knowledge/search', async (req, res) => {
   try {
     const { query } = req.body;
@@ -845,7 +1354,10 @@ router.post('/api/knowledge/search', async (req, res) => {
 
 router.get('/api/knowledge/import-history', async (req, res) => {
   try {
-    res.json([]);
+    const limit = parseInt(req.query.limit as string) || 50;
+    const agentId = typeof req.query.agentId === 'string' ? req.query.agentId : undefined;
+    const history = await knowledgeService.getImportHistory(limit, agentId);
+    res.json(history);
   } catch (error: any) {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   }
@@ -936,25 +1448,6 @@ router.delete('/api/attachments/:id', async (req, res) => {
   }
 });
 
-router.get('/api/policies', async (req, res) => {
-  try {
-    const policies = await permissionService.getPolicies();
-    res.json(policies);
-  } catch (error: any) {
-    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
-  }
-});
-
-router.post('/api/policies', async (req, res) => {
-  try {
-    const { name, priority, agentId, skillId, toolName, resourcePattern, readAction, writeAction, executeAction } = req.body;
-    const policyId = await permissionService.createPolicy({ name, priority, agentId, skillId, toolName, resourcePattern, readAction, writeAction, executeAction });
-    res.json({ policyId });
-  } catch (error: any) {
-    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
-  }
-});
-
 router.post('/api/permissions/:id/grant', async (req, res) => {
   try {
     const clientContext = requireClientContext(req, res);
@@ -963,7 +1456,10 @@ router.post('/api/permissions/:id/grant', async (req, res) => {
     }
 
     const { decidedBy, reason } = req.body;
-    await permissionService.approvePermissionRequest(req.params.id, decidedBy, reason);
+    const approveResult = await permissionService.approvePermissionRequest(req.params.id, decidedBy, reason);
+    if (approveResult.changed) {
+      resumeTaskAfterPermissionApproval(approveResult.taskId);
+    }
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
@@ -1008,7 +1504,10 @@ router.post('/api/permission-requests/:id/approve', async (req, res) => {
     }
 
     const { decidedBy, reason } = req.body;
-    await permissionService.approvePermissionRequest(req.params.id, decidedBy || 'user', reason);
+    const approveResult = await permissionService.approvePermissionRequest(req.params.id, decidedBy || 'user', reason);
+    if (approveResult.changed) {
+      resumeTaskAfterPermissionApproval(approveResult.taskId);
+    }
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
@@ -1176,14 +1675,25 @@ router.get('/api/tasks/:id/timeline', async (req, res) => {
       return res.status(404).json({ error: { code: 'TASK_NOT_FOUND', message: '任务不存在' } });
     }
 
-    const events = await taskService.getVisibleTaskEvents(req.params.id, clientContext.clientId, 1000);
+    const limit = parseInt(req.query.limit as string) || 100;
+    const cursor = buildCursorFromQuery(req.params.id, req.query.cursor, req.query.fromSequence);
+    const fetched = await taskService.getVisibleTaskEvents(req.params.id, clientContext.clientId, limit + 1, cursor);
+    const hasMore = fetched.length > limit;
+    const events = hasMore ? fetched.slice(0, limit) : fetched;
+    const nextCursor = events.length > 0 ? (events[events.length - 1] as any).cursor : null;
+
     res.json({
       data: events,
       pagination: {
         page: 1,
-        pageSize: 1000,
+        pageSize: limit,
         total: events.length,
-        hasMore: false
+        hasMore,
+        nextCursor
+      },
+      cursor: {
+        requested: cursor || null,
+        next: hasMore ? nextCursor : null
       }
     });
   } catch (error: any) {
@@ -1203,75 +1713,19 @@ router.get('/api/tasks/:id/report', async (req, res) => {
       return res.status(404).json({ error: { code: 'TASK_NOT_FOUND', message: '任务不存在' } });
     }
 
-    const steps = await taskService.getSteps(req.params.id);
-    const outputs = await taskService.getOutputs(req.params.id);
-    const events = await taskService.getVisibleTaskEvents(req.params.id, clientContext.clientId, 100);
-    const permissionDecisions = await permissionService.getTaskPermissionSummary(req.params.id);
+    const view = await taskProjectionService.getVisibleTaskExecutionView(req.params.id, clientContext.clientId);
+    if (!view) {
+      return res.status(404).json({ error: { code: 'TASK_NOT_FOUND', message: '任务不存在' } });
+    }
 
-    const linkedMemoryRows = await db.select()
-      .from(taskMemoryLinks)
-      .where(eq(taskMemoryLinks.taskId, req.params.id));
-    const linkedMemoryIds = linkedMemoryRows.map((row) => row.memoryId);
-    const directMemoryRows = await db.select()
-      .from(memoryEntries)
-      .where(eq(memoryEntries.taskId, req.params.id));
-    const linkedMemories = linkedMemoryIds.length > 0
-      ? await db.select().from(memoryEntries).where(inArray(memoryEntries.id, linkedMemoryIds))
-      : [];
-    const memoryEntryDetails = [...directMemoryRows, ...linkedMemories]
-      .filter((entry, index, list) => list.findIndex((candidate) => candidate.id === entry.id) === index)
-      .map((entry) => ({
-        id: entry.id,
-        summary: entry.summary || entry.content?.slice(0, 120) || '未命名记忆',
-        content: entry.content,
-        sourceType: entry.sourceType,
-        importance: entry.importance,
-        createdAt: entry.createdAt,
-        conversationId: entry.conversationId,
-        taskId: entry.taskId
-      }));
-
-    const knowledgeHits = await db.select()
-      .from(knowledgeHitLogs)
-      .where(eq(knowledgeHitLogs.taskId, req.params.id));
-    const knowledgeDocIds = knowledgeHits.map((hit) => hit.documentId).filter(Boolean) as string[];
-    const referencedDocs = knowledgeDocIds.length > 0
-      ? await db.select().from(knowledgeDocuments).where(inArray(knowledgeDocuments.id, knowledgeDocIds))
-      : [];
-    const knowledgeReferences = knowledgeHits.map((hit) => {
-      const document = referencedDocs.find((doc) => doc.id === hit.documentId);
-      return {
-        id: hit.id,
-        documentId: hit.documentId,
-        title: document?.title || '未命中文档标题',
-        summary: document?.content?.slice(0, 160) || '',
-        score: hit.score,
-        sourceType: document?.sourceType || null,
-        sourceTaskId: document?.sourceTaskId || null,
-        agentId: document?.agentId || null,
-        query: hit.query
-      };
-    });
-
-    const toolCalls = await db.select()
-      .from(toolInvocationLogs)
-      .where(eq(toolInvocationLogs.taskId, req.params.id))
-      .orderBy(desc(toolInvocationLogs.createdAt));
-    const modelCalls = await db.select()
-      .from(modelCallLogs)
-      .where(eq(modelCallLogs.taskId, req.params.id))
-      .orderBy(desc(modelCallLogs.createdAt));
-    const participants = await db.select()
-      .from(agentParticipations)
-      .where(eq(agentParticipations.taskId, req.params.id));
-
-    res.json(buildTaskReport(task, steps, outputs, events, permissionDecisions, {
-      memoryEntries: memoryEntryDetails,
-      knowledgeReferences,
-      toolCalls,
-      modelCalls,
-      agentParticipations: participants
-    }));
+    res.json(view.report || buildTaskReport(
+      view.task,
+      view.steps as unknown as TaskStepInput[],
+      view.outputs as unknown as TaskOutputInput[],
+      view.events as unknown as TaskEventInput[],
+      [],
+      {}
+    ));
   } catch (error: any) {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   }
@@ -1461,11 +1915,24 @@ router.post('/api/skills/:id/activate', async (req, res) => {
 router.post('/api/skills/:id/install', async (req, res) => {
   try {
     const result = await skillInvocationService.installSkill(req.params.id);
+    if (!result.success) {
+      const errorCode = result.errorCode || 'SKILL_INSTALL_FAILED';
+      return res.status(errorCode.startsWith('SKILL_RUNTIME_') ? 400 : 500).json({
+        error: {
+          code: errorCode,
+          message: result.error || 'Skill install failed'
+        },
+        skillId: req.params.id,
+        validation: result.validation
+      });
+    }
     res.json(result);
   } catch (error: any) {
     res.status(500).json({
-      success: false,
-      error: error.message,
+      error: {
+        code: 'SKILL_INSTALL_FAILED',
+        message: error.message
+      },
       skillId: req.params.id
     });
   }
@@ -1474,11 +1941,24 @@ router.post('/api/skills/:id/install', async (req, res) => {
 router.post('/api/skills/:id/uninstall', async (req, res) => {
   try {
     const result = await skillInvocationService.uninstallSkill(req.params.id);
+    if (!result.success) {
+      const errorCode = result.errorCode || 'SKILL_UNINSTALL_FAILED';
+      return res.status(errorCode.startsWith('SKILL_RUNTIME_') ? 400 : 500).json({
+        error: {
+          code: errorCode,
+          message: result.error || 'Skill uninstall failed'
+        },
+        skillId: req.params.id,
+        validation: result.validation
+      });
+    }
     res.json(result);
   } catch (error: any) {
     res.status(500).json({
-      success: false,
-      error: error.message,
+      error: {
+        code: 'SKILL_UNINSTALL_FAILED',
+        message: error.message
+      },
       skillId: req.params.id
     });
   }
@@ -1487,19 +1967,33 @@ router.post('/api/skills/:id/uninstall', async (req, res) => {
 router.get('/api/skills/:id/status', async (req, res) => {
   try {
     const skillId = req.params.id;
-    const hasInstall = await skillInvocationService.hasInstallScript(skillId);
-    const hasUninstall = await skillInvocationService.hasUninstallScript(skillId);
-    const isInstalled = await skillInvocationService.isInstalled(skillId);
-    const installLang = await skillInvocationService.getInstallScriptLanguage(skillId);
-    const uninstallLang = await skillInvocationService.getUninstallScriptLanguage(skillId);
+    const [hasInstall, hasUninstall, isInstalled, validation] = await Promise.all([
+      skillInvocationService.hasInstallScript(skillId),
+      skillInvocationService.hasUninstallScript(skillId),
+      skillInvocationService.isInstalled(skillId),
+      skillInvocationService.getRuntimeValidation(skillId)
+    ]);
+
+    const lifecycleStatus = !validation.valid
+      ? 'validation_failed'
+      : (isInstalled ? 'installed' : 'not_installed');
 
     res.json({
       skillId,
       hasInstallScript: hasInstall,
       hasUninstallScript: hasUninstall,
-      installScriptLanguage: installLang,
-      uninstallScriptLanguage: uninstallLang,
-      isInstalled
+      installScriptLanguage: validation.valid ? validation.language : validation.declaredLanguage,
+      uninstallScriptLanguage: validation.valid ? validation.language : validation.declaredLanguage,
+      isInstalled,
+      lifecycleStatus,
+      validation: {
+        valid: validation.valid,
+        code: validation.code,
+        message: validation.message,
+        declaredLanguage: validation.declaredLanguage,
+        detectedLanguages: validation.detectedLanguages,
+        dimensions: validation.dimensions
+      }
     });
   } catch (error: any) {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
@@ -1508,7 +2002,31 @@ router.get('/api/skills/:id/status', async (req, res) => {
 
 router.patch('/api/skills/:id', async (req, res) => {
   try {
-    await agentService.updateSkill(req.params.id, req.body);
+    const runtimeLanguageProvided = Object.prototype.hasOwnProperty.call(req.body, 'runtimeLanguage');
+    const runtimeLanguageValue = req.body.runtimeLanguage;
+    const normalizedRuntimeLanguage = runtimeLanguageProvided
+      ? normalizeSkillRuntimeLanguage(runtimeLanguageValue)
+      : undefined;
+
+    if (runtimeLanguageProvided && runtimeLanguageValue !== null && String(runtimeLanguageValue).trim() !== '' && !normalizedRuntimeLanguage) {
+      return res.status(400).json({
+        error: {
+          code: 'SKILL_RUNTIME_LANGUAGE_INVALID',
+          message: 'runtimeLanguage 取值无效'
+        }
+      });
+    }
+
+    const nextRuntimeLanguage = runtimeLanguageProvided
+      ? ((runtimeLanguageValue === null || String(runtimeLanguageValue).trim() === '')
+        ? null
+        : normalizedRuntimeLanguage)
+      : undefined;
+
+    await agentService.updateSkill(req.params.id, {
+      ...req.body,
+      runtimeLanguage: nextRuntimeLanguage
+    });
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
@@ -1527,6 +2045,62 @@ router.delete('/api/skills/:id', async (req, res) => {
 router.patch('/api/memories/:id', async (req, res) => {
   try {
     const { content, summary, importance } = req.body;
+
+    if (
+      content === undefined &&
+      summary === undefined &&
+      importance === undefined
+    ) {
+      return res.status(400).json({
+        error: {
+          code: 'INVALID_PARAMS',
+          message: 'content, summary or importance is required'
+        }
+      });
+    }
+
+    if (summary !== undefined && (!String(summary).trim())) {
+      return res.status(400).json({
+        error: {
+          code: 'INVALID_PARAMS',
+          message: 'summary cannot be empty'
+        }
+      });
+    }
+
+    if (content !== undefined && (!String(content).trim())) {
+      return res.status(400).json({
+        error: {
+          code: 'INVALID_PARAMS',
+          message: 'content cannot be empty'
+        }
+      });
+    }
+
+    if (importance !== undefined && !['low', 'medium', 'high'].includes(importance)) {
+      return res.status(400).json({
+        error: {
+          code: 'INVALID_PARAMS',
+          message: 'importance must be one of low, medium, high'
+        }
+      });
+    }
+
+    const success = await knowledgeService.updateMemory(req.params.id, {
+      content: content === undefined ? undefined : String(content).trim(),
+      summary: summary === undefined ? undefined : String(summary).trim(),
+      importance
+    });
+
+    if (!success) {
+      return res.status(404).json({
+        error: {
+          code: 'MEMORY_NOT_FOUND',
+          message: 'Memory not found'
+        }
+      });
+    }
+
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
@@ -1575,57 +2149,6 @@ router.get('/api/memory-entries/:id/source', async (req, res) => {
   }
 });
 
-router.get('/api/agents/:id/test', async (req, res) => {
-  try {
-    res.json({ success: true, message: 'Agent connectivity test not implemented' });
-  } catch (error: any) {
-    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
-  }
-});
-
-router.get('/api/policies/:id', async (req, res) => {
-  try {
-    const policies = await permissionService.getPolicies();
-    const policy = policies.find(p => p.id === req.params.id);
-    if (!policy) {
-      return res.status(404).json({ error: { code: 'POLICY_NOT_FOUND', message: 'Policy not found' } });
-    }
-    res.json(policy);
-  } catch (error: any) {
-    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
-  }
-});
-
-router.patch('/api/policies/:id', async (req, res) => {
-  try {
-    const { name, priority, readAction, writeAction, executeAction } = req.body;
-    res.json({ success: true });
-  } catch (error: any) {
-    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
-  }
-});
-
-router.delete('/api/policies/:id', async (req, res) => {
-  try {
-    await permissionService.deletePolicy(req.params.id);
-    res.json({ success: true });
-  } catch (error: any) {
-    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
-  }
-});
-
-router.post('/api/policies/batch-delete', async (req, res) => {
-  try {
-    const { ids } = req.body;
-    for (const id of ids || []) {
-      await permissionService.deletePolicy(id);
-    }
-    res.json({ success: true });
-  } catch (error: any) {
-    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
-  }
-});
-
 router.post('/api/tasks/batch-delete', async (req, res) => {
   try {
     const { ids } = req.body;
@@ -1646,9 +2169,12 @@ router.post('/api/export/tasks', async (req, res) => {
       : [];
 
     const taskData = await Promise.all(tasks.map(async (task: any) => {
-      const steps = await taskService.getSteps(task.id);
-      const outputs = await taskService.getOutputs(task.id);
-      return { ...task, steps, outputs };
+      const view = await taskProjectionService.getTaskExecutionView(task.id);
+      return {
+        ...task,
+        steps: view?.steps || [],
+        outputs: view?.outputs || []
+      };
     }));
 
     if (format === 'json') {
@@ -1707,7 +2233,8 @@ router.get('/api/memory-consolidations/daily/history', async (req, res) => {
       date: new Date(record.createdAt).toISOString().slice(0, 10),
       status: 'completed',
       memoryCount: 1,
-      note: record.summary || record.content || ''
+      note: record.summary || record.content || '',
+      agentId: record.agentId || undefined
     })));
   } catch (error: any) {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
@@ -1790,6 +2317,105 @@ router.get('/api/monitoring/resources', async (req, res) => {
   try {
     const snapshot = await buildMonitoringSnapshot();
     res.json(snapshot.resources);
+  } catch (error: any) {
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
+  }
+});
+
+router.get('/api/agents/:id/skill-permissions', async (req, res) => {
+  try {
+    const agent = await agentService.getAgent(req.params.id);
+    if (!agent) {
+      return res.status(404).json({
+        error: {
+          code: 'AGENT_NOT_FOUND',
+          message: 'Agent 不存在'
+        }
+      });
+    }
+
+    const bindings = await agentService.getAgentSkillPermissionBindings(req.params.id);
+    res.json(bindings);
+  } catch (error: any) {
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
+  }
+});
+
+router.post('/api/skills/import', async (req, res) => {
+  try {
+    if (!req.files) {
+      return res.status(400).json({
+        error: {
+          code: 'SKILL_PACKAGE_REQUIRED',
+          message: '请选择 Skill 安装包'
+        }
+      });
+    }
+
+    const files = req.files as { [key: string]: fileUpload.UploadedFile | fileUpload.UploadedFile[] };
+    const rawFile = files.file || files.files || Object.values(files)[0];
+    const uploadFile = Array.isArray(rawFile) ? rawFile[0] : rawFile;
+
+    if (!uploadFile?.data || !uploadFile?.name) {
+      return res.status(400).json({
+        error: {
+          code: 'SKILL_PACKAGE_REQUIRED',
+          message: '请选择有效的 Skill 安装包'
+        }
+      });
+    }
+
+    const result = await skillInvocationService.importSkillFromZip(uploadFile.name, uploadFile.data);
+    if (!result.success) {
+      return res.status(400).json({
+        error: {
+          code: 'SKILL_IMPORT_FAILED',
+          message: result.error || 'Skill 安装包导入失败'
+        }
+      });
+    }
+
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
+  }
+});
+
+router.post('/api/skills/preview', async (req, res) => {
+  try {
+    if (!req.files) {
+      return res.status(400).json({
+        error: {
+          code: 'SKILL_PACKAGE_REQUIRED',
+          message: '请选择 Skill 安装包'
+        }
+      });
+    }
+
+    const files = req.files as { [key: string]: fileUpload.UploadedFile | fileUpload.UploadedFile[] };
+    const rawFile = files.file || files.files || Object.values(files)[0];
+    const uploadFile = Array.isArray(rawFile) ? rawFile[0] : rawFile;
+
+    if (!uploadFile?.data || !uploadFile?.name) {
+      return res.status(400).json({
+        error: {
+          code: 'SKILL_PACKAGE_REQUIRED',
+          message: '请选择有效的 Skill 安装包'
+        }
+      });
+    }
+
+    const preview = await skillInvocationService.previewSkillPackage(uploadFile.name, uploadFile.data);
+    if (!preview.success) {
+      return res.status(400).json({
+        error: {
+          code: 'SKILL_IMPORT_FAILED',
+          message: preview.error || 'Skill 安装包预览失败'
+        }
+      });
+    }
+
+    res.json(preview);
   } catch (error: any) {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   }

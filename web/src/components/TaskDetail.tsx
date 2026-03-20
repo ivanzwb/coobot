@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
+import { api } from '../api/client';
 import { format } from 'date-fns';
 
 const stepStatusLabels: Record<string, string> = {
@@ -60,18 +61,58 @@ interface TaskDetailProps {
   taskId?: string;
 }
 
+interface PendingPermissionRequest {
+  id: string;
+  taskId: string;
+  action: string;
+  target: string;
+  description?: string;
+  status: string;
+  createdAt?: string;
+}
+
 export function TaskDetail({ taskId: propTaskId }: TaskDetailProps) {
   const params = useParams<{ taskId: string }>();
   const taskId = propTaskId || params.taskId || '';
   const navigate = useNavigate();
   const { currentTask, currentTaskSteps, currentTaskOutputs, currentTaskEvents, cancelTask, retryTask, fetchTaskDetail } = useAppStore();
   const [activeTab, setActiveTab] = useState<'steps' | 'timeline' | 'outputs'>('steps');
+  const [pendingPermissions, setPendingPermissions] = useState<PendingPermissionRequest[]>([]);
+  const [permissionBusyId, setPermissionBusyId] = useState<string | null>(null);
 
   useEffect(() => {
     if (taskId) {
       fetchTaskDetail(taskId);
     }
   }, [taskId, fetchTaskDetail]);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const loadPendingPermissions = async () => {
+      if (!taskId) {
+        setPendingPermissions([]);
+        return;
+      }
+
+      try {
+        const requests = await api.getPendingPermissions() as PendingPermissionRequest[];
+        const related = (Array.isArray(requests) ? requests : []).filter((item) => item.taskId === taskId);
+        setPendingPermissions(related);
+      } catch {
+        setPendingPermissions([]);
+      }
+    };
+
+    void loadPendingPermissions();
+    timer = setInterval(() => {
+      void loadPendingPermissions();
+    }, 3000);
+
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [taskId]);
 
   const handleCancel = async () => {
     if (confirm('确定要取消这个任务吗?')) {
@@ -81,6 +122,30 @@ export function TaskDetail({ taskId: propTaskId }: TaskDetailProps) {
 
   const handleRetry = async () => {
     await retryTask(taskId);
+  };
+
+  const handleApprovePermission = async (requestId: string) => {
+    setPermissionBusyId(requestId);
+    try {
+      await api.approvePermissionRequest(requestId, '任务详情页批准');
+      await fetchTaskDetail(taskId, { silent: true });
+      const requests = await api.getPendingPermissions() as PendingPermissionRequest[];
+      setPendingPermissions((Array.isArray(requests) ? requests : []).filter((item) => item.taskId === taskId));
+    } finally {
+      setPermissionBusyId(null);
+    }
+  };
+
+  const handleRejectPermission = async (requestId: string) => {
+    setPermissionBusyId(requestId);
+    try {
+      await api.rejectPermissionRequest(requestId, '任务详情页拒绝');
+      await fetchTaskDetail(taskId, { silent: true });
+      const requests = await api.getPendingPermissions() as PendingPermissionRequest[];
+      setPendingPermissions((Array.isArray(requests) ? requests : []).filter((item) => item.taskId === taskId));
+    } finally {
+      setPermissionBusyId(null);
+    }
   };
 
   const task = currentTask;
@@ -95,6 +160,12 @@ export function TaskDetail({ taskId: propTaskId }: TaskDetailProps) {
           <h2>任务详情</h2>
         </div>
         <div className="header-actions">
+          <button
+            className="btn btn-secondary"
+            onClick={() => navigate(`/tasks/${taskId}/checkpoints`)}
+          >
+            检查点恢复
+          </button>
           {task?.status === 'failed' && (
             <button className="btn btn-primary" onClick={handleRetry}>重试</button>
           )}
@@ -106,30 +177,50 @@ export function TaskDetail({ taskId: propTaskId }: TaskDetailProps) {
         </div>
       </div>
 
-      <TaskOverviewSection task={task} />
+      <div className="task-detail-layout">
+        <div className="task-detail-main">
+          <TaskOverviewSection task={task} />
 
-      {(task?.complexityDecisionSummary || task?.arrangementStatus === 'TaskArrangementCompleted') && (
-        <TaskHierarchySection
-          task={task}
-          subTasks={task?.subTasks || []}
-        />
-      )}
+          {pendingPermissions.length > 0 && (
+            <TaskPermissionPendingSection
+              requests={pendingPermissions}
+              busyId={permissionBusyId}
+              onApprove={handleApprovePermission}
+              onReject={handleRejectPermission}
+            />
+          )}
 
-      {(task?.waitingAnomalySummary || task?.interventionRequiredReason) && (
-        <TaskWaitingAnomalySection
-          anomalySummary={task?.waitingAnomalySummary}
-          interventionReason={task?.interventionRequiredReason}
-          thresholdBasis={task?.waitingThresholdBasis}
-        />
-      )}
+          {(task?.complexityDecisionSummary || task?.arrangementStatus === 'TaskArrangementCompleted') && (
+            <TaskHierarchySection
+              task={task}
+              subTasks={task?.subTasks || []}
+            />
+          )}
 
-      {task?.reassessmentRequired && (
-        <TaskReassessmentSection
-          reassessmentType={task?.reassessmentType}
-          previousValue={task?.previousMarkerValue}
-          newValue={task?.newMarkerValue}
-        />
-      )}
+          {(task?.waitingAnomalySummary || task?.interventionRequiredReason) && (
+            <TaskWaitingAnomalySection
+              anomalySummary={task?.waitingAnomalySummary}
+              interventionReason={task?.interventionRequiredReason}
+              thresholdBasis={task?.waitingThresholdBasis}
+            />
+          )}
+
+          {task?.reassessmentRequired && (
+            <TaskReassessmentSection
+              reassessmentType={task?.reassessmentType}
+              previousValue={task?.previousMarkerValue}
+              newValue={task?.newMarkerValue}
+            />
+          )}
+        </div>
+
+        <div className="task-detail-side">
+          <TaskTimelineSection events={currentTaskEvents} />
+          {task?.notifications && task.notifications.length > 0 && (
+            <TaskNotificationSection notifications={task.notifications} />
+          )}
+        </div>
+      </div>
 
       <TaskStepsSection
         steps={currentTaskSteps}
@@ -137,15 +228,61 @@ export function TaskDetail({ taskId: propTaskId }: TaskDetailProps) {
         onTabChange={setActiveTab}
       />
 
-      <TaskTimelineSection events={currentTaskEvents} />
-
       {currentTaskOutputs.length > 0 && (
         <TaskOutputSection outputs={currentTaskOutputs} />
       )}
+    </div>
+  );
+}
 
-      {task?.notifications && task.notifications.length > 0 && (
-        <TaskNotificationSection notifications={task.notifications} />
-      )}
+function TaskPermissionPendingSection({
+  requests,
+  busyId,
+  onApprove,
+  onReject
+}: {
+  requests: PendingPermissionRequest[];
+  busyId: string | null;
+  onApprove: (requestId: string) => Promise<void>;
+  onReject: (requestId: string) => Promise<void>;
+}) {
+  return (
+    <div className="task-permission-pending-section">
+      <div className="section-card warning">
+        <div className="section-title">⚠️ 待审批权限请求</div>
+        <div className="permission-request-list">
+          {requests.map((request) => (
+            <div className="permission-request-item" key={request.id}>
+              <div className="permission-request-main">
+                <div className="permission-request-line">
+                  <span className="permission-request-action">{request.action}</span>
+                  <span className="permission-request-target">{request.target}</span>
+                </div>
+                {request.description && (
+                  <div className="permission-request-description">{request.description}</div>
+                )}
+                <div className="permission-request-id">请求ID: {request.id}</div>
+              </div>
+              <div className="permission-request-actions">
+                <button
+                  className="btn btn-secondary"
+                  disabled={busyId === request.id}
+                  onClick={() => onReject(request.id)}
+                >
+                  拒绝
+                </button>
+                <button
+                  className="btn btn-primary"
+                  disabled={busyId === request.id}
+                  onClick={() => onApprove(request.id)}
+                >
+                  批准
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -435,9 +572,89 @@ function TaskStepsSection({
 }
 
 function TaskTimelineSection({ events }: { events: any[] }) {
+  const parseEventPayload = (payload: unknown): Record<string, any> => {
+    if (!payload) {
+      return {};
+    }
+
+    if (typeof payload === 'string') {
+      try {
+        const parsed = JSON.parse(payload);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+
+    return typeof payload === 'object' ? (payload as Record<string, any>) : {};
+  };
+
+  const latestStepFailedEvent = [...events]
+    .reverse()
+    .find((event) => event?.eventType === 'TaskStepFailed');
+
+  const failurePayload = latestStepFailedEvent
+    ? parseEventPayload(latestStepFailedEvent.payload)
+    : null;
+
+  const failureDiagnostics = failurePayload
+    ? {
+        failureCode: failurePayload.failureCode || 'UNKNOWN',
+        failureRound: failurePayload.failureRound ?? '-',
+        failedTool: failurePayload.failedTool || '-',
+        toolCallCount: failurePayload.toolCallCount ?? 0,
+        lastTool: failurePayload.lastTool || '-',
+        error: failurePayload.error || latestStepFailedEvent?.summary || '-'
+      }
+    : null;
+
+  const getTimelineTypeClass = (eventType?: string) => {
+    if (!eventType) return '';
+    if (eventType === 'GoalSatisfactionEvaluated') return 'goal-satisfaction';
+    if (eventType === 'TaskReplanned') return 'task-replanned';
+    return 'default';
+  };
+
+  const getTimelineLabel = (eventType?: string) => {
+    if (eventType === 'GoalSatisfactionEvaluated') return '目标满足评估';
+    if (eventType === 'TaskReplanned') return '任务重编排';
+    return eventType;
+  };
+
   return (
     <div className="task-timeline-section">
       <h3>📜 时间线</h3>
+      {failureDiagnostics && (
+        <div className="failure-diagnostic-card">
+          <div className="failure-diagnostic-title">失败诊断</div>
+          <div className="failure-diagnostic-grid">
+            <div className="failure-diagnostic-item">
+              <span className="failure-diagnostic-label">错误码</span>
+              <span className="failure-diagnostic-value mono">{failureDiagnostics.failureCode}</span>
+            </div>
+            <div className="failure-diagnostic-item">
+              <span className="failure-diagnostic-label">失败轮次</span>
+              <span className="failure-diagnostic-value">{failureDiagnostics.failureRound}</span>
+            </div>
+            <div className="failure-diagnostic-item">
+              <span className="failure-diagnostic-label">失败工具</span>
+              <span className="failure-diagnostic-value mono">{failureDiagnostics.failedTool}</span>
+            </div>
+            <div className="failure-diagnostic-item">
+              <span className="failure-diagnostic-label">工具调用次数</span>
+              <span className="failure-diagnostic-value">{failureDiagnostics.toolCallCount}</span>
+            </div>
+            <div className="failure-diagnostic-item">
+              <span className="failure-diagnostic-label">最后工具</span>
+              <span className="failure-diagnostic-value mono">{failureDiagnostics.lastTool}</span>
+            </div>
+            <div className="failure-diagnostic-item full">
+              <span className="failure-diagnostic-label">错误信息</span>
+              <span className="failure-diagnostic-value">{failureDiagnostics.error}</span>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="timeline-list">
         {events.length === 0 ? (
           <div className="empty-state">
@@ -445,12 +662,12 @@ function TaskTimelineSection({ events }: { events: any[] }) {
           </div>
         ) : (
           events.map((event) => (
-            <div key={event.id} className="timeline-item">
+            <div key={event.id} className={`timeline-item ${getTimelineTypeClass(event.eventType)}`}>
               <div className="timeline-time">
                 {format(new Date(event.timestamp), 'HH:mm:ss')}
               </div>
               <div className="timeline-content">
-                <div className="timeline-event-type">{event.eventType}</div>
+                <div className="timeline-event-type">{getTimelineLabel(event.eventType)}</div>
                 {event.summary && <div className="timeline-summary">{event.summary}</div>}
               </div>
             </div>

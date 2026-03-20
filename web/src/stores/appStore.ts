@@ -59,6 +59,7 @@ export interface Task {
   complexity: string;
   triggerDecisionSummary?: string;
   complexityDecisionSummary?: string;
+  currentReasoningSummary?: string;
   arrangementStatus?: string;
   arrangementEta?: string;
   userNotificationStage?: string;
@@ -141,6 +142,41 @@ function upsertTaskIntoList(tasks: Task[], nextTask: Task): Task[] {
 
 function sortMessagesByCreatedAt(messages: Message[]) {
   return [...messages].sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
+}
+
+function isTerminalTaskStatus(status: string) {
+  return [
+    'completed',
+    'TaskCompleted',
+    'failed',
+    'TaskFailed',
+    'cancelled',
+    'TaskCancelled',
+    'manually_closed',
+    'timed_out',
+    'partial_failed',
+    'intervention_required'
+  ].includes(status);
+}
+
+function selectFocusTask(tasks: Task[], preferredTaskId?: string | null): Task | null {
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    return null;
+  }
+
+  if (preferredTaskId) {
+    const preferredTask = tasks.find((task) => task.id === preferredTaskId);
+    if (preferredTask) {
+      return preferredTask;
+    }
+  }
+
+  const activeTask = tasks.find((task) => !isTerminalTaskStatus(task.status));
+  if (activeTask) {
+    return activeTask;
+  }
+
+  return tasks[0] || null;
 }
 
 function getStoredConversationId() {
@@ -297,11 +333,43 @@ export const useAppStore = create<AppState>((set, get) => ({
       persistMessages(conversation.id, normalizedMessages);
       set({ messages: normalizedMessages });
 
-      const tasks = await api.getTasks(conversation.id) as Task[];
+      const tasks = await api.getTasks(conversation.id, 200, 0) as Task[];
       if (!isLatestConversationRequest(requestId)) {
         return;
       }
-      set({ tasks });
+
+      const focusTask = selectFocusTask(tasks);
+      set({
+        tasks,
+        currentTask: focusTask,
+        selectedTaskId: focusTask?.id || null,
+        currentTaskSteps: [],
+        currentTaskOutputs: [],
+        currentTaskEvents: []
+      });
+
+      if (!focusTask) {
+        return;
+      }
+
+      const [task, steps, outputs, events] = await Promise.all([
+        api.getTask(focusTask.id) as Promise<Task>,
+        api.getTaskSteps(focusTask.id) as Promise<TaskStep[]>,
+        api.getTaskOutputs(focusTask.id) as Promise<TaskOutput[]>,
+        api.getTaskEvents(focusTask.id) as Promise<any[]>
+      ]);
+
+      if (!isLatestConversationRequest(requestId)) {
+        return;
+      }
+
+      set((state) => ({
+        currentTask: task,
+        currentTaskSteps: steps,
+        currentTaskOutputs: outputs,
+        currentTaskEvents: events,
+        tasks: upsertTaskIntoList(state.tasks, task)
+      }));
     } catch (error: any) {
       if (isLatestConversationRequest(requestId)) {
         set({ error: error.message });
@@ -343,7 +411,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       const [serverMessages, tasks] = await Promise.all([
         api.getMessages(nextConversationId) as Promise<Message[]>,
-        api.getTasks(nextConversationId) as Promise<Task[]>
+        api.getTasks(nextConversationId, 200, 0) as Promise<Task[]>
       ]);
 
       if (!isLatestConversationRequest(requestId)) {
@@ -353,10 +421,40 @@ export const useAppStore = create<AppState>((set, get) => ({
       const normalizedMessages = normalizeMessages(serverMessages);
       persistMessages(nextConversationId, normalizedMessages);
 
+      const focusTask = selectFocusTask(tasks);
+
       set({
         messages: normalizedMessages,
-        tasks
+        tasks,
+        currentTask: focusTask,
+        selectedTaskId: focusTask?.id || null,
+        currentTaskSteps: [],
+        currentTaskOutputs: [],
+        currentTaskEvents: []
       });
+
+      if (!focusTask) {
+        return;
+      }
+
+      const [task, steps, outputs, events] = await Promise.all([
+        api.getTask(focusTask.id) as Promise<Task>,
+        api.getTaskSteps(focusTask.id) as Promise<TaskStep[]>,
+        api.getTaskOutputs(focusTask.id) as Promise<TaskOutput[]>,
+        api.getTaskEvents(focusTask.id) as Promise<any[]>
+      ]);
+
+      if (!isLatestConversationRequest(requestId)) {
+        return;
+      }
+
+      set((state) => ({
+        currentTask: task,
+        currentTaskSteps: steps,
+        currentTaskOutputs: outputs,
+        currentTaskEvents: events,
+        tasks: upsertTaskIntoList(state.tasks, task)
+      }));
     } catch (error: any) {
       if (isLatestConversationRequest(requestId)) {
         set({ error: error.message });
@@ -403,7 +501,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       const [serverMessages, tasks] = await Promise.all([
         api.getMessages(conversationId) as Promise<Message[]>,
-        api.getTasks(conversationId) as Promise<Task[]>
+        api.getTasks(conversationId, 200, 0) as Promise<Task[]>
       ]);
 
       persistConversationId(conversationId);
@@ -470,7 +568,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ isLoading: true });
       }
 
-      const tasks = await api.getTasks(requestedConversationId) as Task[];
+      const tasks = await api.getTasks(requestedConversationId, 200, 0) as Task[];
       if (get().conversationId !== requestedConversationId) {
         return;
       }

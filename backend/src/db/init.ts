@@ -1,13 +1,85 @@
 import { db } from '../db/index.js';
-import { agents, skills, permissionPolicies, systemConfigs } from '../db/schema.js';
+import { agents, skills, permissionPolicies, systemConfigs, promptTemplates, promptVersions } from '../db/schema.js';
 import { v4 as uuidv4 } from 'uuid';
 import { pathToFileURL } from 'node:url';
+import fs from 'node:fs';
+import path from 'node:path';
+import { eq } from 'drizzle-orm';
+
+async function initializeBuiltInPromptTemplates() {
+  const candidates = [
+    path.resolve(process.cwd(), 'prompt_templates'),
+    path.resolve(process.cwd(), 'backend', 'prompt_templates')
+  ];
+
+  const templateDir = candidates.find((dirPath) => fs.existsSync(dirPath));
+  if (!templateDir) {
+    console.log('[Init] prompt_templates directory not found, skip built-in prompt initialization');
+    return;
+  }
+
+  const files = fs.readdirSync(templateDir)
+    .filter((fileName) => fileName.toLowerCase().endsWith('.md'));
+
+  if (files.length === 0) {
+    console.log('[Init] No built-in prompt markdown files found, skip');
+    return;
+  }
+
+  let createdCount = 0;
+
+  for (const fileName of files) {
+    const filePath = path.join(templateDir, fileName);
+    const content = fs.readFileSync(filePath, 'utf-8').trim();
+    if (!content) {
+      continue;
+    }
+
+    const name = path.basename(fileName, path.extname(fileName));
+    const [existing] = await db.select({ id: promptTemplates.id })
+      .from(promptTemplates)
+      .where(eq(promptTemplates.name, name))
+      .limit(1);
+
+    if (existing) {
+      continue;
+    }
+
+    const now = new Date();
+    const templateId = uuidv4();
+
+    await db.insert(promptTemplates).values({
+      id: templateId,
+      name,
+      type: 'domain',
+      description: '系统内置 Prompt 模板（从 prompt_templates/*.md 初始化）',
+      currentVersion: 1,
+      createdAt: now,
+      updatedAt: now
+    });
+
+    await db.insert(promptVersions).values({
+      id: uuidv4(),
+      templateId,
+      version: 1,
+      system: content,
+      slots: JSON.stringify([]),
+      changeLog: '系统初始化导入内置模板',
+      createdAt: now
+    });
+
+    createdCount += 1;
+  }
+
+  console.log(`[Init] Built-in prompt templates initialized: created ${createdCount}, scanned ${files.length}`);
+}
 
 export async function initializeDatabase() {
   console.log('[Init] Starting database initialization...');
 
   const existingAgents = await db.select().from(agents).limit(1);
   if (existingAgents.length > 0) {
+    await initializeBuiltInPromptTemplates();
     console.log('[Init] Database already initialized');
     return;
   }
@@ -17,7 +89,6 @@ export async function initializeDatabase() {
     id: leaderAgentId,
     type: 'leader',
     name: 'Leader Agent',
-    role: '负责任务规划、分解和结果汇总',
     model: 'gpt-4',
     temperature: 0.7,
     skills: JSON.stringify([]),
@@ -27,10 +98,10 @@ export async function initializeDatabase() {
   });
 
   const domainAgents = [
-    { id: uuidv4(), name: 'Code Agent', role: '负责代码编写和开发任务', type: 'domain' },
-    { id: uuidv4(), name: 'Document Agent', role: '负责文档生成和处理', type: 'domain' },
-    { id: uuidv4(), name: 'Search Agent', role: '负责信息检索和搜索', type: 'domain' },
-    { id: uuidv4(), name: 'Analysis Agent', role: '负责数据分析和处理', type: 'domain' }
+    { id: uuidv4(), name: 'Code Agent', type: 'domain' },
+    { id: uuidv4(), name: 'Document Agent', type: 'domain' },
+    { id: uuidv4(), name: 'Search Agent', type: 'domain' },
+    { id: uuidv4(), name: 'Analysis Agent', type: 'domain' }
   ];
 
   for (const agent of domainAgents) {
@@ -38,7 +109,6 @@ export async function initializeDatabase() {
       id: agent.id,
       type: agent.type,
       name: agent.name,
-      role: agent.role,
       model: 'gpt-4',
       temperature: 0.7,
       skills: JSON.stringify([]),
@@ -93,24 +163,24 @@ export async function initializeDatabase() {
       name: 'Allow Read Operations',
       priority: 10,
       readAction: 'allow',
-      writeAction: 'deny',
-      executeAction: 'deny'
+      writeAction: 'ask',
+      executeAction: 'ask'
     },
     {
       id: uuidv4(),
       name: 'Prompt on Write',
       priority: 20,
       readAction: 'allow',
-      writeAction: 'prompt',
-      executeAction: 'deny'
+      writeAction: 'ask',
+      executeAction: 'ask'
     },
     {
       id: uuidv4(),
       name: 'Deny Execute by Default',
       priority: 30,
       readAction: 'allow',
-      writeAction: 'deny',
-      executeAction: 'deny'
+      writeAction: 'ask',
+      executeAction: 'ask'
     }
   ];
 
@@ -143,6 +213,8 @@ export async function initializeDatabase() {
       description: config.description
     });
   }
+
+  await initializeBuiltInPromptTemplates();
 
   console.log('[Init] Database initialized successfully');
   console.log(`[Init] Created ${1 + domainAgents.length} agents`);

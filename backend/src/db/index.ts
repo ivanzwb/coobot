@@ -13,6 +13,20 @@ if (!fs.existsSync(dbDir)) {
 
 const sqlite = new Database(dbPath);
 sqlite.pragma('journal_mode = WAL');
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS knowledge_import_history (
+    id TEXT PRIMARY KEY,
+    file_name TEXT NOT NULL,
+    mime_type TEXT,
+    agent_id TEXT,
+    status TEXT NOT NULL DEFAULT 'processing',
+    message TEXT,
+    document_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (document_id) REFERENCES knowledge_documents(id)
+  );
+`);
 
 export const db = drizzle(sqlite, { schema });
 

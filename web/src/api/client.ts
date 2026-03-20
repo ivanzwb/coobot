@@ -35,6 +35,18 @@ function buildClientHeaders(headers?: HeadersInit): HeadersInit {
 
 export { buildClientHeaders };
 
+export class ApiError extends Error {
+  code?: string;
+  details?: unknown;
+
+  constructor(message: string, code?: string, details?: unknown) {
+    super(message);
+    this.name = 'ApiError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
 async function fetchAPI<T>(url: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers || {});
 
@@ -48,8 +60,15 @@ async function fetchAPI<T>(url: string, options?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: 'Request failed' }));
-    throw new Error(error.message || `HTTP ${response.status}`);
+    const error = await response.json().catch(() => null as any);
+    const code = error?.code || error?.error?.code;
+    const details = error?.details || error?.validation || error;
+    const errorMessage =
+      (typeof error?.message === 'string' && error.message)
+      || (typeof error?.error === 'string' && error.error)
+      || (typeof error?.error?.message === 'string' && error.error.message)
+      || `HTTP ${response.status}`;
+    throw new ApiError(errorMessage, code, details);
   }
 
   return response.json();
@@ -178,26 +197,176 @@ export const api = {
       body: JSON.stringify({ title, content, sourceType })
     }),
 
+  uploadKnowledgeFile: (file: File, agentId?: string) => {
+    return api.uploadKnowledgeFiles([file], agentId);
+  },
+
+  uploadKnowledgeFiles: (files: File[], agentId?: string) => {
+    const body = new FormData();
+    files.forEach((file) => {
+      body.append('files', file, file.name);
+    });
+    if (agentId) {
+      body.append('agentId', agentId);
+    }
+
+    return fetchAPI(`${API_BASE}/knowledge/upload`, {
+      method: 'POST',
+      body
+    });
+  },
+
+  updateKnowledgeDocumentTitle: (id: string, title: string) =>
+    fetchAPI(`${API_BASE}/knowledge/${id}/title`, {
+      method: 'PATCH',
+      body: JSON.stringify({ title })
+    }),
+
   deleteKnowledgeDocument: (id: string) =>
     fetchAPI(`${API_BASE}/knowledge/${id}`, { method: 'DELETE' }),
 
-  createAgent: (data: { name: string; type: string; role: string; model: string; temperature: number }) =>
+  createAgent: (data: {
+    name: string;
+    model: string;
+    temperature: number;
+    skills?: string[];
+    skillPermissionBindings?: Array<{
+      skillId: string;
+      toolName: string;
+      readAction: 'allow' | 'ask' | 'deny';
+      writeAction: 'allow' | 'ask' | 'deny';
+      executeAction: 'allow' | 'ask' | 'deny';
+    }>;
+    promptProfile?: {
+      templateId: string;
+      templateVersion: number;
+    };
+  }) =>
     fetchAPI(`${API_BASE}/agents`, {
       method: 'POST',
+      body: JSON.stringify(data)
+    }),
+
+  updateAgent: (
+    id: string,
+    data: Partial<{
+      name: string;
+      model: string;
+      temperature: number;
+      status: string;
+      skills: string[];
+      skillPermissionBindings: Array<{
+        skillId: string;
+        toolName: string;
+        readAction: 'allow' | 'ask' | 'deny';
+        writeAction: 'allow' | 'ask' | 'deny';
+        executeAction: 'allow' | 'ask' | 'deny';
+      }>;
+      promptProfile: {
+        templateId: string;
+        templateVersion: number;
+      };
+    }>
+  ) =>
+    fetchAPI(`${API_BASE}/agents/${id}`, {
+      method: 'PATCH',
       body: JSON.stringify(data)
     }),
 
   deleteAgent: (id: string) =>
     fetchAPI(`${API_BASE}/agents/${id}`, { method: 'DELETE' }),
 
-  createSkill: (data: { name: string; description: string; instructions: string }) =>
+  deactivateAgent: (id: string) =>
+    fetchAPI(`${API_BASE}/agents/${id}/deactivate`, { method: 'POST' }),
+
+  activateAgent: (id: string) =>
+    fetchAPI(`${API_BASE}/agents/${id}/activate`, { method: 'POST' }),
+
+  getAgentSkillPermissions: (id: string) =>
+    fetchAPI(`${API_BASE}/agents/${id}/skill-permissions`),
+
+  createSkill: (data: {
+    name: string;
+    description: string;
+    instructions: string;
+    runtimeLanguage?: 'javascript' | 'python' | 'ruby' | 'bash' | 'powershell' | null;
+    version?: string;
+    permissions?: {
+      read: 'allow' | 'ask' | 'deny';
+      write: 'allow' | 'ask' | 'deny';
+      execute: 'allow' | 'ask' | 'deny';
+    };
+    tools?: Array<{
+      name: string;
+      description: string;
+      permissions: {
+        read: 'allow' | 'ask' | 'deny';
+        write: 'allow' | 'ask' | 'deny';
+        execute: 'allow' | 'ask' | 'deny';
+      };
+    }>;
+  }) =>
     fetchAPI(`${API_BASE}/skills`, {
       method: 'POST',
       body: JSON.stringify(data)
     }),
 
+  importSkillPackage: (file: File) => {
+    const body = new FormData();
+    body.append('file', file, file.name);
+    return fetchAPI(`${API_BASE}/skills/import`, {
+      method: 'POST',
+      body
+    });
+  },
+
+  previewSkillPackage: (file: File) => {
+    const body = new FormData();
+    body.append('file', file, file.name);
+    return fetchAPI(`${API_BASE}/skills/preview`, {
+      method: 'POST',
+      body
+    });
+  },
+
   deleteSkill: (id: string) =>
     fetchAPI(`${API_BASE}/skills/${id}`, { method: 'DELETE' }),
+
+  getSkillStatus: (id: string) =>
+    fetchAPI(`${API_BASE}/skills/${id}/status`),
+
+  installSkill: (id: string) =>
+    fetchAPI(`${API_BASE}/skills/${id}/install`, { method: 'POST' }),
+
+  uninstallSkill: (id: string) =>
+    fetchAPI(`${API_BASE}/skills/${id}/uninstall`, { method: 'POST' }),
+
+  updateSkill: (id: string, data: Partial<{
+    name: string;
+    description: string;
+    instructions: string;
+    runtimeLanguage: 'javascript' | 'python' | 'ruby' | 'bash' | 'powershell' | null;
+    version: string;
+    status: string;
+    permissions: {
+      read: 'allow' | 'ask' | 'deny';
+      write: 'allow' | 'ask' | 'deny';
+      execute: 'allow' | 'ask' | 'deny';
+    };
+    tools: Array<{
+      name: string;
+      description: string;
+      permissions: {
+        read: 'allow' | 'ask' | 'deny';
+        write: 'allow' | 'ask' | 'deny';
+        execute: 'allow' | 'ask' | 'deny';
+      };
+    }>;
+  }>) =>
+    fetchAPI(`${API_BASE}/skills/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data)
+    }),
 
   activateSkill: (id: string) =>
     fetchAPI(`${API_BASE}/skills/${id}/activate`, { method: 'POST' }),
@@ -205,8 +374,19 @@ export const api = {
   deleteMemory: (id: string) =>
     fetchAPI(`${API_BASE}/memories/${id}`, { method: 'DELETE' }),
 
+  updateMemory: (id: string, payload: { content?: string; summary?: string; importance?: 'low' | 'medium' | 'high' }) =>
+    fetchAPI(`${API_BASE}/memories/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    }),
+
   getTaskReport: (taskId: string) =>
     fetchAPI(`${API_BASE}/tasks/${taskId}/report`, {
+      headers: buildClientHeaders()
+    }),
+
+  getTaskExecutionView: (taskId: string) =>
+    fetchAPI(`${API_BASE}/tasks/${taskId}/execution-view`, {
       headers: buildClientHeaders()
     }),
 
@@ -360,10 +540,148 @@ export const api = {
   acknowledgeAlert: (alertId: string) =>
     fetchAPI(`${API_BASE}/monitoring/alerts/${alertId}/acknowledge`, { method: 'POST' }),
 
-  getImportHistory: () =>
-    fetchAPI(`${API_BASE}/knowledge/import-history`),
+  getImportHistory: (agentId?: string, limit = 50) => {
+    const params = new URLSearchParams();
+    params.append('limit', String(limit));
+    if (agentId) {
+      params.append('agentId', agentId);
+    }
+
+    return fetchAPI(`${API_BASE}/knowledge/import-history?${params.toString()}`);
+  },
 
   getDailyConsolidationHistory: (agentId?: string) =>
-    fetchAPI(`${API_BASE}/memory-consolidations/daily/history${agentId ? `?agentId=${agentId}` : ''}`)
+    fetchAPI(`${API_BASE}/memory-consolidations/daily/history${agentId ? `?agentId=${agentId}` : ''}`),
+
+  getPromptTemplates: async () => {
+    const response = await fetchAPI<{ success: boolean; data: unknown[] }>(`${API_BASE}/prompts/templates`);
+    return response.data || [];
+  },
+
+  getPromptTemplateVersions: async (templateId: string) => {
+    const response = await fetchAPI<{ success: boolean; data: unknown[] }>(`${API_BASE}/prompts/templates/${templateId}/versions`);
+    return response.data || [];
+  },
+
+  getPromptTemplate: async (templateId: string) => {
+    const response = await fetchAPI<{ success: boolean; data: unknown }>(`${API_BASE}/prompts/templates/${templateId}`);
+    return response.data;
+  },
+
+  getPromptTemplateVersion: async (templateId: string, version: number) => {
+    const response = await fetchAPI<{ success: boolean; data: unknown }>(`${API_BASE}/prompts/templates/${templateId}/versions/${version}`);
+    return response.data;
+  },
+
+  createPromptTemplate: async (payload: {
+    name: string;
+    type: 'leader' | 'domain';
+    description?: string;
+    changeLog?: string;
+    system?: string;
+    developer?: string;
+    user?: string;
+    context?: string;
+    toolResult?: string;
+    slots?: Array<{ name: string; description: string; required: boolean; defaultValue?: string }>;
+  }) => {
+    const response = await fetchAPI<{ success: boolean; data: unknown }>(`${API_BASE}/prompts/templates`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    return response.data;
+  },
+
+  updatePromptTemplate: async (templateId: string, payload: {
+    name?: string;
+    type?: 'leader' | 'domain';
+    description?: string;
+    promptContent?: string;
+    changeLog?: string;
+  }) => {
+    const response = await fetchAPI<{ success: boolean; data: unknown }>(`${API_BASE}/prompts/templates/${templateId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+    return response.data;
+  },
+
+  deletePromptTemplate: async (templateId: string) => {
+    await fetchAPI<{ success: boolean }>(`${API_BASE}/prompts/templates/${templateId}`, {
+      method: 'DELETE'
+    });
+  },
+
+  createPromptTemplateVersion: async (templateId: string, payload: {
+    system?: string;
+    developer?: string;
+    user?: string;
+    context?: string;
+    toolResult?: string;
+    slots?: Array<{ name: string; description: string; required: boolean; defaultValue?: string }>;
+    changeLog: string;
+  }) => {
+    const response = await fetchAPI<{ success: boolean; data: unknown }>(`${API_BASE}/prompts/templates/${templateId}/versions`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    return response.data;
+  },
+
+  rollbackPromptTemplateVersion: async (templateId: string, version: number, reason?: string) => {
+    const response = await fetchAPI<{ success: boolean; data: unknown }>(`${API_BASE}/prompts/templates/${templateId}/rollback`, {
+      method: 'POST',
+      body: JSON.stringify({ version, reason })
+    });
+    return response.data;
+  },
+
+  getAgentPromptProfile: async (agentId: string) => {
+    const response = await fetchAPI<{ success: boolean; data: unknown }>(`${API_BASE}/prompts/profiles/${agentId}`);
+    return response.data;
+  },
+
+  createAgentPromptProfile: async (agentId: string, payload: {
+    templateId?: string;
+    templateVersion?: number;
+    roleDefinition: string;
+    behaviorNorm: string;
+    capabilityBoundary: string;
+    customSlots?: Record<string, string>;
+  }) => {
+    const response = await fetchAPI<{ success: boolean; data: unknown }>(`${API_BASE}/prompts/profiles/${agentId}`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    return response.data;
+  },
+
+  updateAgentPromptProfile: async (agentId: string, payload: {
+    templateId?: string;
+    templateVersion?: number;
+    roleDefinition?: string;
+    behaviorNorm?: string;
+    capabilityBoundary?: string;
+    customSlots?: Record<string, string>;
+  }) => {
+    const response = await fetchAPI<{ success: boolean; data: unknown }>(`${API_BASE}/prompts/profiles/${agentId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+    return response.data;
+  },
+
+  migrateAgentPromptProfile: async (agentId: string, targetTemplateId: string, targetVersion: number) => {
+    const response = await fetchAPI<{ success: boolean; data: unknown }>(`${API_BASE}/prompts/profiles/${agentId}/migrate`, {
+      method: 'POST',
+      body: JSON.stringify({ targetTemplateId, targetVersion })
+    });
+    return response.data;
+  },
+
+  getAgentPromptMigrations: async (agentId: string) => {
+    const response = await fetchAPI<{ success: boolean; data: unknown[] }>(`${API_BASE}/prompts/profiles/${agentId}/migrations`);
+    return response.data || [];
+  }
 
 };

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAppStore } from './stores/appStore';
 import { getClientContext } from './api/client';
@@ -14,6 +14,9 @@ import { SkillsPage } from './pages/SkillsPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { ResultPage } from './pages/ResultPage';
 import { DashboardPage } from './pages/DashboardPage';
+import { PromptsPage } from './pages/PromptsPage';
+import { AgentPromptsPage } from './pages/AgentPromptsPage';
+import { TaskCheckpointsPage } from './pages/TaskCheckpointsPage';
 import { buildWebSocketUrl, getRealtimeTaskIds, isTerminalTaskStatus } from './realtime/taskRealtime';
 
 function App() {
@@ -24,6 +27,8 @@ function App() {
   const navigate = useNavigate();
   const location = useLocation();
   const routeConversationId = location.pathname.match(/^\/chat\/([^/]+)$/)?.[1];
+  const isChatRoute = location.pathname === '/chat' || location.pathname.startsWith('/chat/');
+  const [chatDisplayedPermissionRequestIds, setChatDisplayedPermissionRequestIds] = useState<string[]>([]);
 
   useEffect(() => {
     void init(routeConversationId);
@@ -144,19 +149,32 @@ function App() {
     <div className="app">
       <Sidebar />
       <div className="main">
-        <PermissionPanel />
+        <PermissionPanel
+          disabled={isChatRoute}
+          excludeRequestIds={chatDisplayedPermissionRequestIds}
+        />
         <Routes>
           <Route path="/" element={<Navigate to="/chat" replace />} />
-          <Route path="/chat" element={<ChatArea />} />
-          <Route path="/chat/:conversationId" element={<ChatArea />} />
+          <Route
+            path="/chat"
+            element={<ChatArea onPermissionRequestIdsChange={setChatDisplayedPermissionRequestIds} />}
+          />
+          <Route
+            path="/chat/:conversationId"
+            element={<ChatArea onPermissionRequestIdsChange={setChatDisplayedPermissionRequestIds} />}
+          />
           <Route path="/tasks" element={<TaskList />} />
           <Route path="/tasks/:taskId" element={<TaskDetail />} />
+          <Route path="/tasks/:taskId/checkpoints" element={<TaskCheckpointsPage />} />
           <Route path="/results/:taskId" element={<ResultPage />} />
           <Route path="/knowledge/:agentId?" element={<KnowledgePage />} />
           <Route path="/memory/:agentId?" element={<MemoryPage />} />
           <Route path="/agents" element={<AgentsPage />} />
+          <Route path="/agents/:agentId/prompts" element={<AgentPromptsPage />} />
           <Route path="/skills" element={<SkillsPage />} />
+          <Route path="/prompts" element={<PromptsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/monitor" element={<DashboardPage />} />
           <Route path="/dashboard" element={<DashboardPage />} />
         </Routes>
       </div>

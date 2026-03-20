@@ -210,7 +210,8 @@ function buildConversationCommand(action: string, taskId: string, clarificationT
 
 export function ResultPage({ taskId: propTaskId }: { taskId?: string }) {
   const params = useParams<{ taskId: string }>();
-  const taskId = propTaskId || params.taskId || '';
+  const routeTaskId = (propTaskId || params.taskId || '').trim();
+  const [resolvedTaskId, setResolvedTaskId] = useState(routeTaskId);
   const [report, setReport] = useState<TaskReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [memorySource, setMemorySource] = useState<Record<string, any>>({});
@@ -224,19 +225,65 @@ export function ResultPage({ taskId: propTaskId }: { taskId?: string }) {
   const conversationId = useAppStore((state) => state.conversationId);
 
   useEffect(() => {
-    if (taskId) {
-      loadReport();
+    if (routeTaskId) {
+      setResolvedTaskId(routeTaskId);
+      void loadReport(routeTaskId);
     }
-  }, [taskId]);
+  }, [routeTaskId, conversationId]);
 
-  const loadReport = async () => {
-    if (!taskId) return;
+  const resolveTaskIdPrefix = async (rawTaskId: string) => {
+    if (!rawTaskId || rawTaskId.length >= 32) {
+      return rawTaskId;
+    }
+
+    try {
+      const conversation = conversationId
+        ? { id: conversationId }
+        : await api.getConversation() as { id: string };
+      const tasks = await api.getTasks(conversation.id, 200, 0) as Array<{ id: string }>;
+      const matched = tasks.find((task) => task.id === rawTaskId || task.id.startsWith(rawTaskId));
+      return matched?.id || rawTaskId;
+    } catch {
+      return rawTaskId;
+    }
+  };
+
+  const loadReport = async (requestedTaskId: string) => {
+    if (!requestedTaskId) return;
     try {
       setLoading(true);
-      const data = await api.getTaskReport(taskId);
-      setReport(data as TaskReport);
+      const targetTaskId = await resolveTaskIdPrefix(requestedTaskId);
+      setResolvedTaskId(targetTaskId);
+
+      const data = await api.getTaskReport(targetTaskId);
+      const next = (data || {}) as Partial<TaskReport>;
+
+      if (next.task && next.summary) {
+        setReport(next as TaskReport);
+        return;
+      }
+
+      const executionView = await api.getTaskExecutionView(targetTaskId) as any;
+      if (executionView?.task && executionView?.report?.summary) {
+        setReport({
+          ...executionView.report,
+          task: executionView.task,
+          steps: Array.isArray(executionView.steps) ? executionView.steps : [],
+          outputs: Array.isArray(executionView.outputs) ? executionView.outputs : [],
+          events: Array.isArray(executionView.events) ? executionView.events : []
+        } as TaskReport);
+        return;
+      }
+
+      if (executionView?.task && executionView?.summary) {
+        setReport(executionView as TaskReport);
+        return;
+      }
+
+      setReport(null);
     } catch (error) {
       console.error('Failed to load report:', error);
+      setReport(null);
     } finally {
       setLoading(false);
     }
@@ -255,6 +302,17 @@ export function ResultPage({ taskId: propTaskId }: { taskId?: string }) {
       <div className="result-page">
         <div className="empty-state">
           <h3>未找到任务</h3>
+        </div>
+      </div>
+    );
+  }
+
+  if (!report.task || !report.summary) {
+    return (
+      <div className="result-page">
+        <div className="empty-state">
+          <h3>任务报告数据不完整</h3>
+          <p>请稍后刷新重试。</p>
         </div>
       </div>
     );
@@ -411,7 +469,7 @@ export function ResultPage({ taskId: propTaskId }: { taskId?: string }) {
         await initApp();
       }
       await sendMessage(command);
-      await loadReport();
+      await loadReport(resolvedTaskId || routeTaskId);
 
       if (action === 'view_task') {
         navigate(`/tasks/${report.task.id}`);
@@ -450,6 +508,27 @@ export function ResultPage({ taskId: propTaskId }: { taskId?: string }) {
         onViewDetail={handleViewDetail}
       />
 
+      <ResultStageBanner
+        outputStage={report.task.outputStage}
+        finalOutputReady={report.task.finalOutputReady}
+        hasSupplement={Boolean(report.task?.supplementalUpdates && report.task.supplementalUpdates.length > 0)}
+      />
+
+      {(report.summary.failedSteps > 0 || report.task?.degradedDelivery) && (
+        <DegradationSection
+          degradedDelivery={report.task?.degradedDelivery}
+          failedSteps={report.summary.failedSteps}
+          totalSteps={report.summary.totalSteps}
+        />
+      )}
+
+      {report.task?.supplementalUpdates && report.task.supplementalUpdates.length > 0 && (
+        <SupplementSection
+          updates={report.task.supplementalUpdates}
+          supplementalNotificationType={report.task.supplementalNotificationType}
+        />
+      )}
+
       {isArrangedOnly && (
         <ResultArrangementSection
           arrangementSummary={report.task.arrangementSummary}
@@ -461,14 +540,6 @@ export function ResultPage({ taskId: propTaskId }: { taskId?: string }) {
         <ResultSummarySection
           summary={report.task.terminalSummary || report.summary.terminalSummary || ''}
           detail={report.task.complexityDecisionSummary}
-        />
-      )}
-
-      {(report.summary.failedSteps > 0 || report.task?.degradedDelivery) && (
-        <DegradationSection
-          degradedDelivery={report.task?.degradedDelivery}
-          failedSteps={report.summary.failedSteps}
-          totalSteps={report.summary.totalSteps}
         />
       )}
 
@@ -506,13 +577,6 @@ export function ResultPage({ taskId: propTaskId }: { taskId?: string }) {
         <ToolCallSummarySection items={report.toolCallSummary} />
       )}
 
-      {report.task?.supplementalUpdates && report.task.supplementalUpdates.length > 0 && (
-        <SupplementSection
-          updates={report.task.supplementalUpdates}
-          supplementalNotificationType={report.task.supplementalNotificationType}
-        />
-      )}
-
       {knowledgeDraft && (
         <KnowledgeComposerModal
           draft={knowledgeDraft}
@@ -540,6 +604,26 @@ interface ResultBannerProps {
   onAddToKnowledge: () => void;
   onExport: () => void;
   onViewDetail: () => void;
+}
+
+function ResultStageBanner({ outputStage, finalOutputReady, hasSupplement }: {
+  outputStage?: string;
+  finalOutputReady?: boolean;
+  hasSupplement: boolean;
+}) {
+  return (
+    <div className="result-stage-banner">
+      <div className={`stage-chip ${outputStage === 'arranged_only' ? 'active' : ''}`}>
+        1. 已安排
+      </div>
+      <div className={`stage-chip ${outputStage === 'final' || finalOutputReady ? 'active' : ''}`}>
+        2. 最终交付
+      </div>
+      <div className={`stage-chip ${hasSupplement ? 'active' : ''}`}>
+        3. 补充更新
+      </div>
+    </div>
+  );
 }
 
 function ResultBanner({ task, summary, isCompleted, isPartialFailed, isArrangedOnly, isInterventionOnly, onBack, onAddToKnowledge, onExport, onViewDetail }: ResultBannerProps) {
@@ -877,10 +961,34 @@ interface SupplementSectionProps {
 }
 
 function SupplementSection({ updates, supplementalNotificationType }: SupplementSectionProps) {
+  const getNotificationTypeLabel = (value?: string) => {
+    if (!value) {
+      return '补充更新';
+    }
+
+    const normalized = value.toLowerCase();
+    if (normalized.includes('result')) {
+      return '结果补充';
+    }
+    if (normalized.includes('impact')) {
+      return '影响说明';
+    }
+    if (normalized.includes('timeline')) {
+      return '时间线更新';
+    }
+    return value;
+  };
+
+  const notificationTypeLabel = getNotificationTypeLabel(supplementalNotificationType);
+
   return (
     <div className="result-section supplement">
       <h3>📥 补充更新</h3>
       <div className="section-content">
+        <div className="supplement-type-row">
+          <span className="supplement-type-label">通知类型</span>
+          <span className="supplement-type-badge">{notificationTypeLabel}</span>
+        </div>
         <p>
           {supplementalNotificationType === 'supplemental_update'
             ? '这些内容作为补充更新展示，不会覆盖原最终输出主体。'

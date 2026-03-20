@@ -62,6 +62,19 @@ export function PermissionConfirmModal({ request, onApprove, onDeny, onClose }: 
     return labels[action] || action;
   };
 
+  const getDecisionLabel = (decision: string) => {
+    const labels: Record<string, string> = {
+      allow: '允许',
+      ask: '待确认',
+      deny: '拒绝',
+      approved: '已批准',
+      denied: '已拒绝',
+      timeout: '超时'
+    };
+
+    return labels[decision] || decision;
+  };
+
   const handleApprove = async () => {
     setLoading(true);
     try {
@@ -149,7 +162,7 @@ export function PermissionConfirmModal({ request, onApprove, onDeny, onClose }: 
                 {request.trace.map((entry, index) => (
                   <div key={`${entry.layer}-${index}`} style={{ padding: 8, borderRadius: 6, background: '#f9fafb', fontSize: 12 }}>
                     <div>{entry.layer}{entry.policyName ? ` / ${entry.policyName}` : ''}</div>
-                    <div>决策: {entry.decision}</div>
+                    <div>决策: {getDecisionLabel(entry.decision)}</div>
                     {entry.reason && <div>说明: {entry.reason}</div>}
                   </div>
                 ))}
@@ -187,21 +200,21 @@ export function PermissionConfirmModal({ request, onApprove, onDeny, onClose }: 
   );
 }
 
-export function PermissionPanel() {
+interface PermissionPanelProps {
+  disabled?: boolean;
+  excludeRequestIds?: string[];
+}
+
+export function PermissionPanel({ disabled = false, excludeRequestIds = [] }: PermissionPanelProps) {
   const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
   const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    loadPermissions();
-
-    const timer = window.setInterval(() => {
-      loadPermissions();
-    }, 5000);
-
-    return () => window.clearInterval(timer);
-  }, []);
+  const excludedIdSet = new Set(excludeRequestIds);
 
   const loadPermissions = async () => {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      return;
+    }
+
     setLoading(true);
     try {
       const data = await api.getPendingPermissions();
@@ -210,6 +223,26 @@ export function PermissionPanel() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (disabled) {
+      setPermissions([]);
+      setLoading(false);
+      return;
+    }
+
+    loadPermissions();
+
+    const timer = window.setInterval(() => {
+      loadPermissions();
+    }, 15000);
+
+    return () => window.clearInterval(timer);
+  }, [disabled]);
+
+  if (disabled) {
+    return null;
+  }
 
   const handleApprove = async (id: string) => {
     await api.approvePermissionRequest(id);
@@ -225,13 +258,15 @@ export function PermissionPanel() {
     return null;
   }
 
-  if (permissions.length === 0) {
+  const visiblePermissions = permissions.filter((permission) => !excludedIdSet.has(permission.id));
+
+  if (visiblePermissions.length === 0) {
     return null;
   }
 
   return (
     <div style={{ position: 'fixed', bottom: 24, right: 24, zIndex: 1000 }}>
-      {permissions.slice(0, 1).map(request => (
+      {visiblePermissions.slice(0, 1).map(request => (
         <PermissionConfirmModal
           key={request.id}
           request={request}

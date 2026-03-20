@@ -10,16 +10,19 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "date-fns": "^3.3.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "zustand": "^4.5.0",
+    "react-markdown": "^10.1.0",
     "react-router-dom": "^6.22.0",
-    "date-fns": "^3.3.1"
+    "remark-gfm": "^4.0.1",
+    "zustand": "^4.5.0"
   },
   "devDependencies": {
     "@types/react": "^18.2.55",
     "@types/react-dom": "^18.2.19",
     "@vitejs/plugin-react": "^4.2.1",
+    "@vitest/coverage-v8": "^4.1.0",
     "typescript": "^5.3.3",
     "vite": "^5.1.0",
     "vitest": "^4.1.0"
