@@ -140,6 +140,17 @@ export class ToolService {
     }, async (params: any) => {
       return sandboxService.execute({ toolName: 'read_file', parameters: { path: params.path } });
     });
+
+    this.registerTool({
+      name: 'finish',
+      description: '完成任务并返回结果',
+      parameters: [
+        { name: 'result', type: 'string', description: '任务完成结果', required: true }
+      ],
+      requiresPermission: false
+    }, async (params: any) => {
+      return { success: true, output: params.result || '任务完成' };
+    });
   }
 
   registerTool(definition: ToolDefinition, handler: Function) {
@@ -170,6 +181,13 @@ export class ToolService {
     const tool = this.tools.get(toolName);
     if (!tool) {
       return { success: false, error: `Tool not found: ${toolName}` };
+    }
+
+    const missingParams = tool.parameters
+      .filter(p => p.required && (parameters[p.name] === undefined || parameters[p.name] === null))
+      .map(p => p.name);
+    if (missingParams.length > 0) {
+      return { success: false, error: `Missing required parameters: ${missingParams.join(', ')}` };
     }
 
     if (tool.requiresPermission && !skipPermissionCheck) {

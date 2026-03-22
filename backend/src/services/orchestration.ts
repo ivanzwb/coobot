@@ -3,9 +3,14 @@ import { agentExecutionService } from './execution.js';
 import { knowledgeService } from './knowledge.js';
 import { conversationService } from './conversation.js';
 import { taskOutputService } from './output.js';
+import { llmAdapter } from './llm.js';
+import { agentService } from './agent.js';
+import { attachmentService } from './attachment.js';
 import { TaskStatus, TaskComplexity, ArrangementStatus, UserNotificationStage, TriggerMode, StepStatus } from '../types/index.js';
 import { v4 as uuidv4 } from 'uuid';
 import config from 'config';
+import fs from 'fs';
+import path from 'path';
 
 export interface TaskPlan {
   taskId: string;
@@ -38,6 +43,11 @@ export interface RouteDecision {
   complexityDecisionSummary: string;
   selectedAgents: string[];
   selectedSkills: string[];
+  llmGeneratedSteps?: Array<{
+    name: string;
+    agentId: string;
+    isBlocking: boolean;
+  }> | null;
 }
 
 export interface GoalSatisfactionResult {
@@ -237,8 +247,8 @@ export class OrchestrationService {
     };
 
     const planSteps = decision.complexity === TaskComplexity.COMPLEX
-      ? this.generateComplexSteps(decision)
-      : this.generateSimpleSteps(decision);
+      ? await this.generateComplexSteps(decision)
+      : await this.generateSimpleSteps(decision);
 
     const identifiedConflicts = this.identifyResourceConflicts(planSteps);
     const stepsWithConflicts = this.annotateStepsWithConflicts(planSteps, identifiedConflicts);
@@ -595,51 +605,138 @@ export class OrchestrationService {
   }
 
   private async analyzeIntent(input: string, attachments: string[]): Promise<RouteDecision> {
-    const keywords = input.toLowerCase();
-    const hasMultipleParts = [',然后', '并且', '还有', '首先', '其次', '最后'].some(k => keywords.includes(k));
-    const hasComplexVerbs = ['分析', '比较', '总结', '生成报告', '处理多个', '批量'].some(k => keywords.includes(k));
-    const hasMultipleAttachments = attachments.length > 1;
+    try {
+      const [leaderAgents, domainAgents] = await Promise.all([
+        agentService.getLeaderAgents(),
+        agentService.getDomainAgents()
+      ]);
 
-    const isComplex = hasMultipleParts || hasComplexVerbs || hasMultipleAttachments || input.length > 200;
+      const leaderAgentId = leaderAgents[0]?.id || 'agent-leader-default';
+      const selectedAgents = [leaderAgentId];
 
-    const selectedAgents = ['agent-leader-default'];
-    const selectedSkills = [];
+      const attachmentInfo = attachments.length > 0
+        ? `附件列表：${attachments.join(', ')}`
+        : '无附件';
 
-    if (keywords.includes('代码') || keywords.includes('编程') || keywords.includes('开发')) {
-      selectedSkills.push('skill-code');
+      const domainAgentsInfo = domainAgents.length > 0
+        ? `系统中可用的 Domain Agent：\n${domainAgents.map(a => `  - ID: ${a.id}, 名称: ${a.name}`).join('\n')}`
+        : '系统中暂无 Domain Agent';
+
+      const prompt = `你是一个任务编排专家，需要分析用户的任务请求并选择合适的 Agent 来执行。
+
+用户输入：${input}
+${attachmentInfo}
+
+${domainAgentsInfo}
+
+请分析这个任务并返回 JSON 格式的决策结果：
+{
+  "complexity": "simple" 或 "complex",
+  "summary": "任务分析摘要",
+  "steps": [
+    {
+      "name": "步骤名称",
+      "agentId": "Agent的ID（从上述列表中选择，leader任务填'${leaderAgentId}'）",
+      "isBlocking": true 或 false
     }
-    if (keywords.includes('文档') || keywords.includes('报告') || keywords.includes('总结')) {
-      selectedSkills.push('skill-document');
-    }
-    if (keywords.includes('搜索') || keywords.includes('查询') || keywords.includes('查找')) {
-      selectedSkills.push('skill-search');
+  ]
+}
+
+决策规则：
+1. 如果任务只需要一个 Agent 完成，选择 complexity: simple
+2. 如果任务涉及多个不同领域的子任务，选择 complexity: complex，并为每个子任务选择合适的 Agent
+3. 根据任务的性质选择最合适的 Agent：
+   - 代码相关任务 → 选择擅长代码的 Agent
+   - 文档相关任务 → 选择擅长文档处理的 Agent
+   - 搜索相关任务 → 选择擅长搜索的 Agent
+4. 如果有附件且需要分析/处理附件内容，选择能处理该类型内容的 Agent
+5. 如果不确定，选择通用的 Agent
+
+请只返回 JSON，不要包含其他文字。`;
+
+      const response = await llmAdapter.chat({
+        messages: [{ role: 'user', content: prompt }],
+        tools: undefined
+      });
+
+      const content = response.content || '';
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+
+        const normalizedSteps = (parsed.steps || []).map((step: any) => {
+          let agentId = step.agentId;
+          if (agentId === leaderAgentId || agentId === 'leader' || agentId === 'agent-leader-default') {
+            agentId = leaderAgentId;
+          } else if (!domainAgents.find(a => a.id === agentId)) {
+            const agentName = (step.agentId || '').toLowerCase();
+            const matchedAgent = domainAgents.find(a =>
+              (a.name || '').toLowerCase().includes(agentName)
+            );
+            if (matchedAgent) {
+              agentId = matchedAgent.id;
+            } else if (domainAgents.length > 0) {
+              agentId = domainAgents[0].id;
+            }
+          }
+          return {
+            name: step.name,
+            agentId: agentId,
+            isBlocking: step.isBlocking !== false
+          };
+        });
+
+        return {
+          complexity: parsed.complexity === 'complex' ? TaskComplexity.COMPLEX : TaskComplexity.SIMPLE,
+          complexityDecisionSummary: parsed.summary || (parsed.complexity === 'complex' ? '任务被判定为复杂任务' : '任务被判定为简单任务'),
+          selectedAgents,
+          selectedSkills: [],
+          llmGeneratedSteps: normalizedSteps.length > 0 ? normalizedSteps : null
+        };
+      }
+    } catch (error) {
+      console.error('[Orchestration] LLM intent analysis failed, falling back to simple analysis:', error);
     }
 
+    const leaderAgents = await agentService.getLeaderAgents();
     return {
-      complexity: isComplex ? TaskComplexity.COMPLEX : TaskComplexity.SIMPLE,
-      complexityDecisionSummary: isComplex
-        ? `任务被判定为复杂任务，原因：${[
-            hasMultipleParts ? '多步骤' : '',
-            hasComplexVerbs ? '复杂动词' : '',
-            hasMultipleAttachments ? '多个附件' : '',
-            input.length > 200 ? '输入较长' : ''
-          ].filter(Boolean).join('、')}`
-        : '任务被判定为简单任务，直接执行',
-      selectedAgents,
-      selectedSkills
+      complexity: TaskComplexity.SIMPLE,
+      complexityDecisionSummary: '任务被判定为简单任务，直接执行',
+      selectedAgents: [leaderAgents[0]?.id || 'agent-leader-default'],
+      selectedSkills: []
     };
   }
 
-  private generateComplexSteps(decision: RouteDecision): PlanStep[] {
-    return [
-      { agentId: decision.selectedAgents[0], name: '分析任务需求', order: 1, isBlocking: true },
-      { agentId: 'agent-domain-code', name: '执行代码任务', order: 2, parallelGroupId: 'parallel-1', isBlocking: true, conflictKeys: ['file:code'] },
-      { agentId: 'agent-domain-document', name: '生成文档', order: 3, parallelGroupId: 'parallel-1', isBlocking: false, conflictKeys: ['file:document'] },
-      { agentId: decision.selectedAgents[0], name: '汇总结果', order: 4, isBlocking: true }
+  private async generateComplexSteps(decision: RouteDecision): Promise<PlanStep[]> {
+    if (decision.llmGeneratedSteps && decision.llmGeneratedSteps.length > 0) {
+      return decision.llmGeneratedSteps.map((step, index) => ({
+        agentId: step.agentId,
+        name: step.name,
+        order: index + 1,
+        isBlocking: step.isBlocking
+      }));
+    }
+
+    const steps: PlanStep[] = [
+      { agentId: decision.selectedAgents[0], name: '分析任务需求', order: 1, isBlocking: true }
     ];
+
+    steps.push({ agentId: decision.selectedAgents[0], name: '汇总结果', order: steps.length + 1, isBlocking: true });
+
+    return steps;
   }
 
-  private generateSimpleSteps(decision: RouteDecision): PlanStep[] {
+  private async generateSimpleSteps(decision: RouteDecision): Promise<PlanStep[]> {
+    if (decision.llmGeneratedSteps && decision.llmGeneratedSteps.length > 0) {
+      return decision.llmGeneratedSteps.map((step, index) => ({
+        agentId: step.agentId,
+        name: step.name,
+        order: index + 1,
+        isBlocking: step.isBlocking
+      }));
+    }
+
     return [
       { agentId: decision.selectedAgents[0], name: '处理请求', order: 1, isBlocking: true }
     ];
@@ -802,10 +899,16 @@ export class OrchestrationService {
       summary: outputContent === '任务已完成' ? '任务执行成功' : '任务执行结果已生成'
     });
 
+    const task = await taskService.getTask(taskId);
+    const terminalSummary = outputContent && outputContent !== '任务已完成' 
+      ? outputContent.split('\n\n')[0].slice(0, 200)
+      : task?.intakeInputSummary || '任务已完成';
+
     await taskService.updateTaskStatus(taskId, TaskStatus.COMPLETED, {
       finalOutputReady: true,
       outputStage: 'final',
-      userNotificationStage: UserNotificationStage.FINAL_NOTIFIED
+      userNotificationStage: UserNotificationStage.FINAL_NOTIFIED,
+      terminalSummary
     });
   }
 
@@ -993,52 +1096,101 @@ export class OrchestrationService {
 
     for (let index = messages.length - 1; index >= 0; index--) {
       const message = messages[index] as any;
+      
       if (message.role !== 'user' || !Array.isArray(message.attachments) || message.attachments.length === 0) {
         continue;
       }
 
-      return message.attachments.map((att: any) => {
-        const fileName = att?.name || 'unknown-file';
-        const parseSummary = this.extractAttachmentSummary(att?.url);
-        return {
-          fileName,
-          parseSummary
-        };
-      });
+      const resolvedAttachments: ExecutionAttachmentContext[] = [];
+      for (let i = 0; i < message.attachments.length; i++) {
+        const att = message.attachments[i];
+        const ext = att?.name?.substring(att.name.lastIndexOf('.')) || '.txt';
+        const fileName = `attachment-${Date.now()}-${i}${ext}`;
+
+        if (att?.url && att.url.startsWith('data:')) {
+          const savedPath = await this.saveAttachmentToWorkspace(fileName, att.url);
+          if (savedPath) {
+            resolvedAttachments.push({
+              fileName,
+              parseSummary: savedPath
+            });
+          }
+        }
+      }
+
+      return resolvedAttachments;
     }
 
     return [];
   }
 
-  private extractAttachmentSummary(url?: string): string | undefined {
-    if (!url || typeof url !== 'string' || !url.startsWith('data:')) {
-      return undefined;
-    }
-
-    const commaIndex = url.indexOf(',');
-    if (commaIndex < 0) {
-      return undefined;
-    }
-
-    const meta = url.slice(5, commaIndex).toLowerCase();
-    const payload = url.slice(commaIndex + 1);
-    const isBase64 = meta.includes(';base64');
-    const mimeType = (meta.split(';')[0] || '').trim();
-
-    if (!(mimeType.startsWith('text/') || mimeType.includes('json') || mimeType.includes('xml') || mimeType.includes('javascript'))) {
-      return '已上传二进制附件';
-    }
-
+  private async saveAttachmentToWorkspace(fileName: string, dataUrl: string): Promise<string | null> {
     try {
-      const decoded = isBase64 ? Buffer.from(payload, 'base64').toString('utf-8') : decodeURIComponent(payload);
-      const normalized = decoded.replace(/\s+/g, ' ').trim();
-      if (!normalized) {
-        return '文本附件为空';
+      const commaIndex = dataUrl.indexOf(',');
+      if (commaIndex < 0) {
+        return null;
       }
-      return normalized.slice(0, 800);
-    } catch {
-      return '附件内容解析失败';
+
+      const meta = dataUrl.slice(5, commaIndex).toLowerCase();
+      const payload = dataUrl.slice(commaIndex + 1);
+      const isBase64 = meta.includes(';base64');
+      const mimeType = (meta.split(';')[0] || '').trim();
+
+      const workspacePath = (config.get('workspace.path') as string) || './workspace';
+      if (!fs.existsSync(workspacePath)) {
+        fs.mkdirSync(workspacePath, { recursive: true });
+      }
+
+      const ext = this.getExtensionFromMimeType(mimeType) || path.extname(fileName) || '.txt';
+      let baseName = fileName.replace(path.extname(fileName), '');
+      const safeFileName = `${baseName}${ext}`;
+      const filePath = path.join(workspacePath, safeFileName);
+
+      let content = '';
+      if (mimeType.startsWith('text/') || mimeType.includes('json') || mimeType.includes('xml') || mimeType.includes('javascript') || mimeType.includes('markdown')) {
+        try {
+          content = isBase64 ? Buffer.from(payload, 'base64').toString('utf-8') : decodeURIComponent(payload);
+        } catch {
+          return null;
+        }
+      } else {
+        const tempId = uuidv4();
+        const tempExt = this.getExtensionFromMimeType(mimeType) || path.extname(fileName) || '.bin';
+        const tempPath = path.join(workspacePath, `${tempId}${tempExt}`);
+        const buffer = isBase64 ? Buffer.from(payload, 'base64') : Buffer.from(payload, 'utf-8');
+        fs.writeFileSync(tempPath, buffer);
+
+        try {
+          const parseResult = await attachmentService.parseAttachment(tempId);
+          content = parseResult.text || parseResult.summary || '';
+        } finally {
+          try { fs.unlinkSync(tempPath); } catch {}
+        }
+      }
+
+      fs.writeFileSync(filePath, content, 'utf-8');
+      return filePath;
+    } catch (error) {
+      console.error('[Orchestration] Failed to save attachment:', error);
+      return null;
     }
+  }
+
+  private getExtensionFromMimeType(mimeType: string): string | null {
+    const mimeToExt: Record<string, string> = {
+      'application/pdf': '.pdf',
+      'application/msword': '.doc',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+      'text/plain': '.txt',
+      'text/markdown': '.md',
+      'text/html': '.html',
+      'text/csv': '.csv',
+      'application/json': '.json',
+      'image/jpeg': '.jpg',
+      'image/png': '.png',
+      'image/gif': '.gif'
+    };
+    return mimeToExt[mimeType] || null;
   }
 }
 

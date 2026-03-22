@@ -1,3 +1,4 @@
+import OpenAI from 'openai';
 import { taskService } from './task.js';
 import { llmAdapter } from './llm.js';
 import { promptService } from './prompt.js';
@@ -70,26 +71,40 @@ export class AgentExecutionService {
     });
 
     try {
-      const systemPrompt = await this.getAgentPrompt(agentId, taskId);
-      let userPrompt = this.buildUserPrompt(input, context);
+      const generatedPrompt = await this.getAgentPrompt(agentId, taskId, input, context);
+      const baseMessages = generatedPrompt.messages;
 
       const selectedSkillIds = Array.isArray(context.selectedSkillIds)
         ? context.selectedSkillIds.filter((value): value is string => typeof value === 'string' && value.length > 0)
         : [];
 
+      let consecutiveReadCount = 0;
+      const maxConsecutiveReads = 3;
+
       while (currentReActRound < this.maxReActRounds) {
-        const result = await this.executeReActRound(
+        const result = await this.executeReActRoundWithHistory(
           taskId,
-          systemPrompt,
-          userPrompt,
+          baseMessages,
           context,
           selectedSkillIds,
           currentReActRound
         );
 
+        console.log(`[Execution] Round ${currentReActRound}: action=${result.action}, reasoning=${result.reasoning?.slice(0, 100)}`);
+
         if (result.action === 'finish') {
-          finalOutput = result.observation || result.actionInput;
+          let finishResult = result.observation || result.reasoning || '';
+          if (!finishResult && result.actionInput) {
+            finishResult = typeof result.actionInput === 'string' 
+              ? result.actionInput 
+              : result.actionInput?.result || result.actionInput?.text || JSON.stringify(result.actionInput);
+          }
+          if (!finishResult) {
+            finishResult = '任务已完成';
+          }
+          finalOutput = finishResult;
           reasoningSummary = result.reasoning;
+          console.log(`[Execution] Finish: "${finalOutput?.slice(0, 100)}"`);
           break;
         }
 
@@ -114,7 +129,10 @@ export class AgentExecutionService {
               route: 'skill'
             });
 
-            userPrompt += `\n\n观察结果：${activationMsg}。当前已激活技能: ${activeSkillIds.join(', ') || '无'}`;
+            baseMessages.push(
+              { role: 'assistant' as const, content: result.reasoning + `\n\n[Tool: ${result.action}(${JSON.stringify(result.actionInput)})]` },
+              { role: 'user' as const, content: `\n\n观察结果：${activationMsg}。当前已激活技能: ${activeSkillIds.join(', ') || '无'}` }
+            );
             currentReActRound++;
             continue;
           }
@@ -127,6 +145,8 @@ export class AgentExecutionService {
             agentId
           );
 
+          console.log(`[Execution] Tool ${result.action} result length: ${toolResult.length}, preview: ${toolResult.slice(0, 200)}`);
+
           toolCalls.push({
             action: result.action,
             input: result.actionInput,
@@ -134,7 +154,31 @@ export class AgentExecutionService {
             round: currentReActRound
           });
 
-          userPrompt += `\n\n观察结果：${toolResult}`;
+          const maxObservationLength = 3000;
+          let truncatedResult = toolResult;
+          if (toolResult.length > maxObservationLength) {
+            truncatedResult = toolResult.substring(0, maxObservationLength) + `\n\n[文件内容过长，已截断，剩余 ${toolResult.length - maxObservationLength} 字符未显示]`;
+          }
+
+          baseMessages.push(
+            { role: 'assistant' as const, content: result.reasoning + `\n\n[Tool: ${result.action}(${JSON.stringify(result.actionInput)})]` },
+            { role: 'user' as const, content: `\n\n观察结果：${truncatedResult}` }
+          );
+
+          if (result.action === 'read_file') {
+            consecutiveReadCount++;
+            if (consecutiveReadCount >= maxConsecutiveReads) {
+              console.log(`[Execution] Forcing analysis after ${consecutiveReadCount} consecutive reads`);
+              
+              const analysisResult = await this.analyzeCollectedContent(baseMessages);
+              if (analysisResult) {
+                finalOutput = analysisResult;
+                break;
+              }
+            }
+          } else {
+            consecutiveReadCount = 0;
+          }
 
           await taskService.updateStep(stepId, {
             observationSummary: toolResult
@@ -214,61 +258,78 @@ export class AgentExecutionService {
     return 'EXEC_RUNTIME_ERROR';
   }
 
-  private async getAgentPrompt(agentId: string, taskId: string): Promise<string> {
-    try {
-      const generated = await promptService.generatePrompt(agentId, {
-        taskId,
-        input: '',
-        attachments: [],
-        taskName: '执行任务',
-        taskDescription: '根据用户需求执行相应操作'
-      });
-      return generated.messages[0]?.content || '';
-    } catch {
-      return '你是一个Domain Agent，负责执行任务。请遵循推理-行动-观察模式，并在完成后输出最终结果。';
-    }
-  }
-
-  private buildUserPrompt(input: string, context: any): string {
-    let prompt = `用户输入：${input}`;
-
-    if (context.previousSteps?.length) {
-      prompt += '\n\n已完成步骤：';
-      for (const step of context.previousSteps) {
-        prompt += `\n- ${step.name}: ${step.observationSummary || '已完成'}`;
-      }
-    }
-
-    if (context.attachments?.length) {
-      prompt += '\n\n附件信息：';
-      for (const att of context.attachments) {
-        prompt += `\n- ${att.fileName}: ${att.parseSummary || ''}`;
-      }
-    }
-
-    prompt += '\n\n请按照推理-行动-观察的循环执行任务。如果任务完成，请调用finish工具。';
-
-    return prompt;
-  }
-
-  private async executeReActRound(
+  private async getAgentPrompt(
+    agentId: string,
     taskId: string,
-    systemPrompt: string,
-    userPrompt: string,
+    input: string,
+    context: any
+  ): Promise<{ messages: Array<{ role: string; content: string }>; requiresTruncation: boolean }> {
+    const normalizedContext = {
+      taskId,
+      input,
+      attachments: (context.attachments || []).map((att: any) => ({
+        fileName: att.fileName || att.name || 'unknown',
+        parseSummary: att.parseSummary || ''
+      })),
+      memory: context.memory || [],
+      knowledge: context.knowledge || [],
+      previousSteps: context.previousSteps || [],
+      agentHistory: [],
+      taskName: '执行任务',
+      taskDescription: input || '根据用户需求执行相应操作'
+    };
+
+    const generated = await promptService.generatePrompt(agentId, normalizedContext);
+    return {
+      messages: generated.messages,
+      requiresTruncation: generated.requiresTruncation
+    };
+  }
+
+  private async executeReActRoundWithHistory(
+    taskId: string,
+    baseMessages: Array<{ role: string; content: string }>,
     context: any,
     selectedSkillIds: string[],
     round: number
   ): Promise<ReActStep> {
-    const hasTools = context.previousSteps?.length === 0;
+    const tools = await this.buildAvailableTools(taskId, selectedSkillIds);
 
-    const tools = hasTools
-      ? await this.buildAvailableTools(taskId, selectedSkillIds)
-      : undefined;
+    const reactInstruction = `你是一个任务执行助手。请严格按照以下规则执行：
 
-    const messages: any[] = [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ];
+**核心任务**：读取并分析用户上传的文件，然后给出总结或回答。
+
+**执行规则**：
+1. 读取文件（使用 read_file 工具）
+2. 分析文件内容
+3. 调用 finish 工具返回分析结果
+
+**重要**：
+- 读取文件后必须分析内容并 finish，不要无限循环读取文件
+- 最多读取 2-3 次文件，如果文件太长，使用 startLine/lineCount 分批读取
+- 如果已经获取到文件的主要内容，应立即分析并 finish`;
+
+    const messages: OpenAI.ChatCompletionMessageParam[] = [];
+
+    messages.push({ role: 'system', content: reactInstruction });
+
+    for (const m of baseMessages) {
+      if (m.role === 'system') {
+        messages.push({ role: 'system', content: m.content });
+      } else if (m.role === 'user') {
+        messages.push({ role: 'user', content: m.content });
+      } else if (m.role === 'assistant') {
+        messages.push({ role: 'assistant', content: m.content });
+      }
+    }
+
+    if (round > 0) {
+      const readCount = round;
+      const prompt = readCount === 1
+        ? `你已读取到文件内容（上面显示）。请分析这些内容，直接调用 finish 工具返回你的分析总结。不要再调用 read_file。`
+        : `你已读取了更多文件内容（上面显示）。请综合所有内容，调用 finish 工具返回完整分析。文件内容已经足够，不需要继续读取。`;
+      messages.push({ role: 'user', content: prompt });
+    }
 
     try {
       const response = await llmAdapter.chat({
@@ -276,21 +337,72 @@ export class AgentExecutionService {
         tools
       });
 
+      console.log(`[ReAct] Round ${round}: LLM response content length=${(response.content || '').length}, content preview: "${(response.content || '').slice(0, 100)}", toolCalls=${response.toolCalls?.length || 0}`);
       if (response.toolCalls && response.toolCalls.length > 0) {
         const toolCall = response.toolCalls[0];
+        console.log(`[ReAct] Round ${round}: toolCall=${toolCall.function.name}, args="${toolCall.function.arguments?.slice(0, 100)}"`);
+        let actionInput;
+        try {
+          actionInput = JSON.parse(toolCall.function.arguments || '{}');
+        } catch (e) {
+          console.log(`[ReAct] Round ${round}: Failed to parse tool args: "${toolCall.function.arguments}"`);
+          if (toolCall.function.name === 'finish') {
+            return {
+              reasoning: response.content || '',
+              action: 'finish',
+              actionInput: { result: response.content || '任务完成' },
+              observation: response.content || ''
+            };
+          }
+          return {
+            reasoning: response.content || '',
+            action: 'finish',
+            actionInput: { result: `工具参数解析失败: ${toolCall.function.arguments}` },
+            observation: `参数解析错误: ${e}`
+          };
+        }
         return {
           reasoning: response.content || '',
           action: toolCall.function.name,
-          actionInput: JSON.parse(toolCall.function.arguments),
+          actionInput,
           observation: ''
         };
       }
 
+      const content = response.content || '';
+      
+      const toolCallMatch = content.match(/\[Tool:\s*(\w+)\s*\(\s*(\{[^}]+\})\s*\)\]/);
+      if (toolCallMatch) {
+        const toolName = toolCallMatch[1];
+        const toolArgs = toolCallMatch[2];
+        try {
+          const parsedArgs = JSON.parse(toolArgs);
+          console.log(`[ReAct] Round ${round}: Detected tool call in text: ${toolName}`);
+          return {
+            reasoning: content.replace(/\[Tool:\s*\w+\s*\([^)]+\)\]/g, '').trim() || '从文本中检测到工具调用',
+            action: toolName,
+            actionInput: parsedArgs,
+            observation: ''
+          };
+        } catch (e) {
+          console.log(`[ReAct] Round ${round}: Failed to parse tool args from text: ${e}`);
+        }
+      }
+
+      if (content.includes('finish') && content.length < 200) {
+        return {
+          reasoning: content,
+          action: 'finish',
+          actionInput: { result: content },
+          observation: content
+        };
+      }
+
       return {
-        reasoning: response.content || '',
+        reasoning: content,
         action: 'finish',
-        actionInput: { result: response.content || '任务完成' },
-        observation: response.content || ''
+        actionInput: { result: content || '任务完成' },
+        observation: content
       };
     } catch (error: any) {
       return {
@@ -489,6 +601,10 @@ export class AgentExecutionService {
     selectedSkillIds: string[],
     agentId: string
   ): Promise<string> {
+    if (toolName === 'finish') {
+      return parameters.result || '任务完成';
+    }
+
     const requiresPermission = ['write_file', 'edit_file', 'delete_file', 'execute_command'].includes(toolName);
 
     const skillId = skillToolRoutingService.getSkillIdByToolName(taskId, toolName);
@@ -530,6 +646,42 @@ export class AgentExecutionService {
     }
 
     return result.output || '操作成功';
+  }
+
+  private async analyzeCollectedContent(baseMessages: Array<{ role: string; content: string }>): Promise<string | null> {
+    const observations: string[] = [];
+    
+    for (const msg of baseMessages) {
+      if (msg.role === 'user' && msg.content.includes('观察结果')) {
+        const match = msg.content.match(/观察结果[：:]\s*([\s\S]+?)(?=\n\n\[|$)/);
+        if (match) {
+          observations.push(match[1]);
+        }
+      }
+    }
+
+    if (observations.length === 0) {
+      return null;
+    }
+
+    const combinedContent = observations.join('\n\n');
+    const analysisPrompt = `你已经读取了文件的多个部分，以下是已获取的内容：
+
+${combinedContent.slice(0, 8000)}
+
+请根据以上内容，给出完整的总结和分析。直接输出你的分析结果，不要再调用任何工具。`;
+
+    try {
+      const response = await llmAdapter.chat({
+        messages: [{ role: 'user', content: analysisPrompt }],
+        tools: []
+      });
+      
+      return response.content || '已读取文件内容但未能生成分析';
+    } catch (error: any) {
+      console.error('[Execution] Analysis failed:', error);
+      return combinedContent.slice(0, 500) + '\n\n[内容已截断]';
+    }
   }
 }
 

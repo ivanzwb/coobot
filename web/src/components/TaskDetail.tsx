@@ -215,7 +215,7 @@ export function TaskDetail({ taskId: propTaskId }: TaskDetailProps) {
         </div>
 
         <div className="task-detail-side">
-          <TaskTimelineSection events={currentTaskEvents} />
+          <TaskTimelineSection events={currentTaskEvents} taskStatus={currentTask?.status} />
           {task?.notifications && task.notifications.length > 0 && (
             <TaskNotificationSection notifications={task.notifications} />
           )}
@@ -571,7 +571,7 @@ function TaskStepsSection({
   );
 }
 
-function TaskTimelineSection({ events }: { events: any[] }) {
+function TaskTimelineSection({ events, taskStatus }: { events: any[]; taskStatus?: string }) {
   const parseEventPayload = (payload: unknown): Record<string, any> => {
     if (!payload) {
       return {};
@@ -621,10 +621,12 @@ function TaskTimelineSection({ events }: { events: any[] }) {
     return eventType;
   };
 
+  const isTaskFailed = taskStatus === 'failed' || taskStatus === 'TaskFailed' || taskStatus === 'cancelled' || taskStatus === 'TaskCancelled' || taskStatus === 'intervention_required' || taskStatus === 'TaskInterventionRequired';
+
   return (
     <div className="task-timeline-section">
       <h3>📜 时间线</h3>
-      {failureDiagnostics && (
+      {isTaskFailed && failureDiagnostics && (
         <div className="failure-diagnostic-card">
           <div className="failure-diagnostic-title">失败诊断</div>
           <div className="failure-diagnostic-grid">

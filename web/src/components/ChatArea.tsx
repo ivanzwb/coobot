@@ -348,6 +348,12 @@ export function ConversationMessagePanel({
     return truncateText(raw);
   };
 
+  const taskHasOutputData = (task: Task) => {
+    const raw = task as Task & { terminalSummary?: string; finalOutputSummary?: string; finalOutput?: string; summary?: string };
+    const output = raw.terminalSummary || raw.finalOutputSummary || raw.finalOutput || raw.summary;
+    return typeof output === 'string' && output.trim() && !isGenericResultText(output);
+  };
+
   useEffect(() => {
     const completedTasks = tasks.filter((task) => normalizeTaskStatus(task).isCompleted);
     const targets = completedTasks.filter((task) => {
@@ -356,6 +362,10 @@ export function ConversationMessagePanel({
       }
 
       if (loadingResultPreviewById[task.id]) {
+        return false;
+      }
+
+      if (taskHasOutputData(task)) {
         return false;
       }
 

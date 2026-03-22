@@ -477,15 +477,14 @@ export class LLMAdapter {
           });
         }
 
-        await this.logModelCall({
-          callId,
-          modelId: modelConfig.id,
-          provider: modelConfig.provider,
-          status: 'failed',
-          error: lastError.message
-        });
-
         if (!this.defaultRetryConfig.retryableErrors.includes(lastError.code)) {
+          await this.logModelCall({
+            callId,
+            modelId: modelConfig.id,
+            provider: modelConfig.provider,
+            status: 'failed',
+            error: lastError.message
+          });
           break;
         }
 

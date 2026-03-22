@@ -364,7 +364,7 @@ export class TaskService {
 
     const whereClause = lastSequence === null
       ? eq(taskEvents.taskId, taskId)
-      : and(eq(taskEvents.taskId, taskId), gt(taskEvents.sequence, lastSequence));
+      : and(eq(taskEvents.taskId, taskId), gt(taskEvents.sequence, lastSequence - 1));
 
     const baseQuery = db.select()
       .from(taskEvents)

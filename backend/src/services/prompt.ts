@@ -126,8 +126,7 @@ export class PromptService {
       templateId: 'leader',
       version: 1,
       system: `你是一个任务规划Agent，负责将用户的需求分解为可执行的子任务。\n{{roleDefinition}}\n{{behaviorNorm}}\n{{capabilityBoundary}}`,
-      developer: `你是一个专业的任务规划助手，负责分析用户需求并制定执行计划。`,
-      user: `用户输入：{{input}}\n\n{{#if attachments}}附件信息：\n{{#each attachments}}- {{this.fileName}} ({{this.parseSummary}})\n{{/each}}{{/if}}\n\n{{#if memory}}相关记忆：\n{{#each memory}}- {{this.summary}}\n{{/each}}{{/if}}\n\n{{#if knowledge}}知识库相关内容：\n{{#each knowledge}}- {{this.title}}: {{this.content}}\n{{/each}}{{/if}}\n\n请分析用户需求并规划执行。`,
+      user: `用户输入：{{input}}\n\n{{#if attachments}}附件文件已上传到工作目录，请使用 read_file("文件名") 工具读取内容，分析后再执行任务：\n{{#each attachments}}- {{this.fileName}}\n{{/each}}{{/if}}\n\n{{#if memory}}相关记忆：\n{{#each memory}}- {{this.summary}}\n{{/each}}{{/if}}\n\n{{#if knowledge}}知识库相关内容：\n{{#each knowledge}}- {{this.title}}: {{this.content}}\n{{/each}}{{/if}}\n\n请先使用 read_file 工具读取所有附件内容，理解文件内容后再进行分析和规划。如果附件内容较长，可以分批读取（使用 startLine 和 lineCount 参数）。`,
       context: `任务上下文信息：\n{{taskName}}\n{{taskDescription}}`,
       toolResult: `工具执行结果：{{toolResult}}`,
       slots: [
@@ -148,8 +147,7 @@ export class PromptService {
       templateId: 'domain',
       version: 1,
       system: `你是一个Domain Agent，负责执行特定领域的任务。\n{{roleDefinition}}\n{{behaviorNorm}}\n{{capabilityBoundary}}`,
-      developer: `你是一个专业的领域任务执行专家。`,
-      user: `任务输入：{{input}}\n\n{{#if previousSteps}}已完成步骤：\n{{#each previousSteps}}- {{this.name}}: {{this.observationSummary}}\n{{/each}}{{/if}}\n\n请继续执行当前任务。`,
+      user: `任务输入：{{input}}\n\n{{#if attachments}}附件文件已上传到工作目录，请使用 read_file("文件名") 工具读取内容，分析后再执行任务：\n{{#each attachments}}- {{this.fileName}}\n{{/each}}{{/if}}\n\n{{#if previousSteps}}已完成步骤：\n{{#each previousSteps}}- {{this.name}}: {{this.observationSummary}}\n{{/each}}{{/if}}\n\n重要：先使用 read_file 工具读取所有附件内容，理解文件后再执行任务。如果附件内容较长，可以分批读取（使用 startLine 和 lineCount 参数）。完成后调用 finish 工具。`,
       context: `当前任务：{{taskName}}\n任务描述：{{taskDescription}}`,
       toolResult: `工具执行结果：{{toolResult}}`,
       slots: [
@@ -157,6 +155,7 @@ export class PromptService {
         { name: 'behaviorNorm', description: '行为规范', required: true },
         { name: 'capabilityBoundary', description: '能力边界', required: true },
         { name: 'input', description: '任务输入', required: true },
+        { name: 'attachments', description: '附件信息', required: false },
         { name: 'previousSteps', description: '已完成步骤', required: false }
       ],
       changeLog: '初始版本',
@@ -691,38 +690,45 @@ export class PromptService {
     agentId: string,
     context: PromptContext
   ): Promise<GeneratedPrompt> {
-    const profile = await this.getAgentPromptProfile(agentId);
-    if (!profile) {
-      throw new Error(`Agent prompt profile not found for agent: ${agentId}`);
-    }
-
+    let profile = await this.getAgentPromptProfile(agentId);
+    
     let templateVersion: PromptVersionData | undefined;
+    let useDefaultProfile = false;
 
-    if (profile.templateId && profile.templateVersion) {
+    if (profile && profile.templateId && profile.templateVersion) {
       templateVersion = await this.getTemplateVersion(profile.templateId, profile.templateVersion);
-    } else if (profile.templateId) {
+    } else if (profile && profile.templateId) {
       templateVersion = await this.getLatestTemplateVersion(profile.templateId);
     }
 
     if (!templateVersion) {
       const agent = await db.select().from(agents).where(eq(agents.id, agentId)).then(r => r[0]);
-      if (!agent) {
-        throw new Error(`Agent not found: ${agentId}`);
+      if (agent) {
+        const defaultTemplateKey = agent.type === 'leader' ? 'leader-v1' : 'domain-v1';
+        templateVersion = this.defaultTemplates.get(defaultTemplateKey);
+        useDefaultProfile = true;
+        console.log(`[PromptService] Using default template for agent ${agentId}, type: ${agent.type}`);
+      } else {
+        if (agentId.includes('leader') || agentId === 'agent-leader-default') {
+          templateVersion = this.defaultTemplates.get('leader-v1');
+          console.log(`[PromptService] Agent not found, using leader-v1 for ${agentId}`);
+        } else {
+          templateVersion = this.defaultTemplates.get('domain-v1');
+          console.log(`[PromptService] Agent not found, using domain-v1 for ${agentId}`);
+        }
+        useDefaultProfile = true;
       }
-
-      const defaultTemplateKey = agent.type === 'leader' ? 'leader-v1' : 'domain-v1';
-      templateVersion = this.defaultTemplates.get(defaultTemplateKey);
     }
 
     if (!templateVersion) {
-      throw new Error('No template available');
+      throw new Error(`No prompt template available for agent: ${agentId}`);
     }
 
     const slotValues: Record<string, unknown> = {
-      roleDefinition: profile.roleDefinition,
-      behaviorNorm: profile.behaviorNorm,
-      capabilityBoundary: profile.capabilityBoundary,
-      ...profile.customSlots,
+      roleDefinition: useDefaultProfile ? '智能助手' : profile!.roleDefinition,
+      behaviorNorm: useDefaultProfile ? '遵循推理-行动-观察模式执行任务' : profile!.behaviorNorm,
+      capabilityBoundary: useDefaultProfile ? '可以使用文件操作、搜索等工具完成任务' : profile!.capabilityBoundary,
+      ...(useDefaultProfile ? {} : profile!.customSlots),
       ...context
     };
 
@@ -732,13 +738,6 @@ export class PromptService {
       messages.push({
         role: 'system',
         content: this.replacePlaceholders(templateVersion.system, slotValues)
-      });
-    }
-
-    if (templateVersion.developer) {
-      messages.push({
-        role: 'developer',
-        content: this.replacePlaceholders(templateVersion.developer, slotValues)
       });
     }
 
@@ -777,7 +776,7 @@ export class PromptService {
       messages: finalMessages,
       templateId: templateVersion.templateId,
       templateVersion: templateVersion.version,
-      agentProfileVersion: profile.version,
+      agentProfileVersion: profile?.version || 1,
       estimatedTokens,
       requiresTruncation,
       truncationSummary,
@@ -857,6 +856,7 @@ export class PromptService {
         if (typeof item === 'object' && item !== null) {
           for (const [key, value] of Object.entries(item as Record<string, unknown>)) {
             itemResult = itemResult.replace(new RegExp(`{{${key}}}`, 'g'), String(value));
+            itemResult = itemResult.replace(new RegExp(`{{this\\.${key}}}`, 'g'), String(value));
           }
         }
         return itemResult;

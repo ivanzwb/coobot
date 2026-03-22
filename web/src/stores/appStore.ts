@@ -672,7 +672,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           await get().fetchTasks({ silent: true });
         }
 
-        if (event.taskId && (event.taskId === currentTask?.id || event.taskId === selectedTaskId)) {
+        const { currentTask: currentTaskNow, selectedTaskId: selectedTaskIdNow } = get();
+        if (event.taskId && (event.taskId === currentTaskNow?.id || event.taskId === selectedTaskIdNow)) {
           await get().fetchTaskDetail(event.taskId, { silent: true });
         }
         return;
@@ -682,7 +683,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       case 'arrangement.completed':
       case 'trigger.activated':
         await get().fetchTasks({ silent: true });
-        if (event.taskId && (event.taskId === currentTask?.id || event.taskId === selectedTaskId)) {
+        const { currentTask: currentTaskNow, selectedTaskId: selectedTaskIdNow } = get();
+        if (event.taskId && (event.taskId === currentTaskNow?.id || event.taskId === selectedTaskIdNow)) {
           await get().fetchTaskDetail(event.taskId, { silent: true });
         }
         return;
