@@ -2,12 +2,15 @@ import { db, schema } from '../db';
 import { eq, and, gte, lt } from 'drizzle-orm';
 import type { MemoryCategory, LtmQueryResult } from '../types';
 import type { SessionMessage, LongTermMemory } from '../db';
+import { logger } from './logger.js';
 
 export class MemoryEngine {
   private timeWindowHours: number = 24;
   private minCountThreshold: number = 5;
 
   async appendMessage(role: 'user' | 'assistant' | 'system', content: string, attachments?: Record<string, unknown>[], relatedTaskId?: string): Promise<number> {
+    logger.debug('MemoryEngine', `Appending ${role} message`, { relatedTaskId, contentLength: content.length });
+    
     const tokenCount = this.estimateTokenCount(content);
     
     const result = await db.insert(schema.sessionMemory).values({
@@ -20,7 +23,10 @@ export class MemoryEngine {
       createdAt: new Date(),
     });
 
-    return result.lastInsertRowid as number;
+    const messageId = result.lastInsertRowid as number;
+    logger.debug('MemoryEngine', `${role} message saved`, { messageId, relatedTaskId });
+    
+    return messageId;
   }
 
   async getActiveHistory(limit: number = 20): Promise<SessionMessage[]> {

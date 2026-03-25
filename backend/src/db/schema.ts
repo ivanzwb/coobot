@@ -20,6 +20,7 @@ export const agents = sqliteTable('agents', {
   type: text('type').notNull(),
   modelConfigId: text('model_config_id').references(() => modelConfigs.id),
   promptTemplateId: text('prompt_template_id'),
+  temperature: real('temperature'),
   status: text('status').default('IDLE'),
   createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),

@@ -47,6 +47,8 @@ export class AgentRuntime extends EventEmitter {
   private runningTasks: Map<string, { abortController: AbortController; isRunning: boolean }> = new Map();
 
   async executeTask(task: Task, agentConfig: AgentConfig): Promise<void> {
+    logger.info('AgentRuntime', 'Starting task execution', { taskId: task.id, agentId: agentConfig.id, agentName: agentConfig.name });
+    
     const abortController = new AbortController();
     this.runningTasks.set(task.id, { abortController, isRunning: true });
 
@@ -62,7 +64,14 @@ export class AgentRuntime extends EventEmitter {
       });
 
       const context = await this.buildContext(task, agentConfig);
+      logger.debug('AgentRuntime', 'Context built', { taskId: task.id, contextLength: context.systemPrompt.length });
+      
       const steps = await this.runReActLoop(task, agentConfig, context);
+      logger.debug('AgentRuntime', 'ReAct loop completed', { taskId: task.id, stepsCount: steps.length });
+
+      const finalOutput = steps[steps.length - 1]?.content || '';
+      await memoryEngine.appendMessage('assistant', finalOutput, [], task.id);
+      logger.info('AgentRuntime', 'Task completed, response saved to memory', { taskId: task.id, outputLength: finalOutput.length });
 
       await taskOrchestrator.updateTaskStatus(task.id, 'COMPLETED');
       
@@ -155,6 +164,8 @@ export class AgentRuntime extends EventEmitter {
     }
 
     while (stepIndex < this.maxReActSteps) {
+      logger.debug('AgentRuntime', 'ReAct step', { taskId: task.id, stepIndex, type: 'THOUGHT' });
+      
       const thought = await this.callModel(currentContext, agentConfig.modelConfig);
       
       const thoughtStep: ReActStep = {
@@ -168,6 +179,7 @@ export class AgentRuntime extends EventEmitter {
       const action = this.parseAction(thought);
       
       if (!action) {
+        logger.debug('AgentRuntime', 'ReAct completed (no action)', { taskId: task.id, totalSteps: stepIndex });
         break;
       }
 
@@ -181,6 +193,8 @@ export class AgentRuntime extends EventEmitter {
       steps.push(actionStep);
       await this.logStep(task.id, actionStep);
 
+      logger.debug('AgentRuntime', 'ReAct step', { taskId: task.id, stepIndex, type: 'ACTION', toolName: action.name });
+      
       const observation = await this.executeTool(agentConfig.id, action.name, action.args);
       
       const observationStep: ReActStep = {
@@ -215,13 +229,19 @@ export class AgentRuntime extends EventEmitter {
         timeout: 60000,
       });
 
+      const messages = [{ role: 'user', content: prompt }];
+      logger.debug('AgentRuntime', 'LLM input', { model: modelConfig.modelName, messages });
+
       const response = await client.chat.completions.create({
         model: modelConfig.modelName,
-        messages: [{ role: 'user', content: prompt }],
+        messages,
         temperature: 0.3,
       });
 
-      return response.choices[0]?.message?.content || '';
+      const output = response.choices[0]?.message?.content || '';
+      logger.debug('AgentRuntime', 'LLM output', { model: modelConfig.modelName, output });
+
+      return output;
     } catch (error) {
       console.error('Model call failed:', error);
       return `Error calling model: ${error instanceof Error ? error.message : String(error)}`;

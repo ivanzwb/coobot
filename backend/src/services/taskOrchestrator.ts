@@ -48,6 +48,22 @@ export class TaskOrchestrator extends EventEmitter {
         this.taskQueue.set(task.id, task);
       }
 
+      const staleParsingTasks = await db.select()
+        .from(schema.tasks)
+        .where(eq(schema.tasks.status, 'PARSING'));
+
+      for (const task of staleParsingTasks) {
+        const staleAge = Date.now() - new Date(task.updatedAt).getTime();
+        if (staleAge > 60000) {
+          await db.update(schema.tasks)
+            .set({ status: 'EXCEPTION', errorMsg: 'Task stale - process restarted', updatedAt: new Date() })
+            .where(eq(schema.tasks.id, task.id));
+          logger.info('TaskOrchestrator', 'Reset stale PARSING task on startup', { taskId: task.id, staleAge });
+        } else {
+          this.taskQueue.set(task.id, task);
+        }
+      }
+
       console.log(`Loaded ${queuedTasks.length} queued tasks and ${runningTasks.length} running tasks from DB`);
     } catch (error) {
       console.error('Failed to load queues from DB:', error);
@@ -108,6 +124,8 @@ export class TaskOrchestrator extends EventEmitter {
       await this.updateTaskStatus(taskId, 'EXCEPTION', `Deadlock detected: ${deadlockError}`);
       throw new Error(`Deadlock detected: ${deadlockError}`);
     }
+
+    logger.info('TaskOrchestrator', 'Dispatching subtasks', { parentTaskId: taskId, nodeCount: dag.length });
 
     for (const node of dag) {
       const subtaskId = uuidv4();
@@ -230,6 +248,13 @@ export class TaskOrchestrator extends EventEmitter {
     if (errorMsg) {
       task.errorMsg = errorMsg;
     }
+
+    logger.info('TaskOrchestrator', 'Task status changed', { 
+      taskId, 
+      previousStatus, 
+      newStatus: status, 
+      errorMsg 
+    });
 
     const updateData: Record<string, unknown> = {
       status: task.status,
@@ -441,12 +466,25 @@ export class TaskOrchestrator extends EventEmitter {
           .from(schema.tasks)
           .where(eq(schema.tasks.status, 'PARSING'));
         
-        if (runningTasks.length > 0) {
-          logger.info('TaskOrchestrator', 'Task already in progress, skipping', { runningTaskId: runningTasks[0].id });
-          break;
+        for (const rt of runningTasks) {
+          const staleAge = Date.now() - new Date(rt.updatedAt).getTime();
+          if (staleAge > 60000) {
+            await db.update(schema.tasks)
+              .set({ status: 'EXCEPTION', errorMsg: 'Stale PARSING task timeout', updatedAt: new Date() })
+              .where(eq(schema.tasks.id, rt.id));
+            logger.warn('TaskOrchestrator', 'Reset stale PARSING task', { taskId: rt.id });
+          } else {
+            logger.info('TaskOrchestrator', 'Task already in progress, skipping', { runningTaskId: rt.id });
+            return;
+          }
         }
         
         await this.updateTaskStatus(task.id, 'PARSING');
+        
+        if (!this.taskQueue.has(task.id)) {
+          this.taskQueue.set(task.id, task as Task);
+        }
+        
         await leaderAgent.processTask(task as Task);
         break;
       }

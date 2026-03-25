@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS agents (
   type TEXT NOT NULL,
   model_config_id TEXT REFERENCES model_configs(id),
   prompt_template_id TEXT,
+  temperature REAL,
   status TEXT DEFAULT 'IDLE',
   created_at INTEGER,
   updated_at INTEGER
@@ -147,7 +148,7 @@ CREATE TABLE IF NOT EXISTS long_term_memory (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL REFERENCES agents(id),
   category TEXT,
-  key_text TEXT NOT NULL,
+  key TEXT NOT NULL,
   value TEXT NOT NULL,
   embedding_id TEXT NOT NULL,
   confidence REAL,
@@ -195,18 +196,6 @@ CREATE TABLE IF NOT EXISTS job_execution_logs (
   created_at INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS model_configs (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  model_name TEXT NOT NULL,
-  base_url TEXT,
-  api_key TEXT,
-  context_window INTEGER DEFAULT 4096,
-  status TEXT DEFAULT 'offline',
-  created_at INTEGER,
-  updated_at INTEGER
-);
 `;
 
 db.exec(schema);

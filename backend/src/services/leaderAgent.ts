@@ -31,6 +31,7 @@ export class LeaderAgent extends EventEmitter {
       const availableAgents = await agentCapabilityRegistry.getActiveAgents();
 
       const intentResult = await this.analyzeIntent(userInput, availableAgents);
+      logger.debug('LeaderAgent', 'Intent analyzed', { taskId: task.id, intent: intentResult.intentType, confidence: intentResult.confidenceScore });
 
       if (intentResult.status === 'CLARIFICATION_NEEDED') {
         await taskOrchestrator.updateTaskStatus(task.id, 'CLARIFICATION_PENDING');
@@ -44,8 +45,10 @@ export class LeaderAgent extends EventEmitter {
       }
 
       const dag = await this.generateDAG(intentResult.refinedGoal, availableAgents);
+      logger.debug('LeaderAgent', 'DAG generated', { taskId: task.id, nodeCount: dag.length });
 
       const validation = await this.validateDAG(dag, availableAgents);
+      logger.debug('LeaderAgent', 'DAG validated', { taskId: task.id, validTasks: validation.dag.length, unassignable: validation.unassignableTasks.length });
 
       if (validation.unassignableTasks.length > 0) {
         await taskOrchestrator.updateTaskStatus(task.id, 'CLARIFICATION_PENDING');
@@ -56,6 +59,7 @@ export class LeaderAgent extends EventEmitter {
       }
 
       await taskOrchestrator.dispatchSubtasks(task.id, validation.dag);
+      logger.info('LeaderAgent', 'Subtasks dispatched', { taskId: task.id, subtaskCount: validation.dag.length });
 
       await taskOrchestrator.updateAgentStatus('LEADER', 'IDLE');
 
@@ -175,14 +179,17 @@ Return only valid JSON, no other text.
       });
 
       logger.info('LeaderAgent', 'Calling OpenAI API');
+      const messages = [{ role: 'user', content: prompt }];
+      logger.debug('LeaderAgent', 'LLM input', { model: modelConfig.modelName, messages });
+
       const response = await client.chat.completions.create({
         model: modelConfig.modelName,
-        messages: [{ role: 'user', content: prompt }],
+        messages,
         temperature: 0.3,
       });
 
       const result = response.choices[0]?.message?.content || '{"confidenceScore": 0.8, "intentType": "general", "refinedGoal": ""}';
-      logger.info('LeaderAgent', 'OpenAI response received', { resultLength: result.length });
+      logger.debug('LeaderAgent', 'LLM output', { model: modelConfig.modelName, output: result });
       return result;
     } catch (error) {
       logger.error('LeaderAgent', 'Model call failed', error);

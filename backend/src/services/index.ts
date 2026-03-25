@@ -25,14 +25,13 @@ import { db, schema } from '../db/index.js';
 
 export async function initializeDatabase(): Promise<void> {
   const tables = [
-    'agents', 'models', 'prompts', 'skills', 'agentSkills',
+    'agents', 'modelConfigs', 'prompts', 'skills', 'agentSkills',
     'agentCapabilities', 'agentToolPermissions', 'tasks', 'taskLogs',
     'knowledgeFiles', 'sessionMemory', 'longTermMemory', 'auditLogs',
     'scheduledJobs', 'jobExecutionLogs', 'permissionRequests'
   ];
 
   for (const table of tables) {
-    if (table === 'models') continue;
     const tableSchema = schema[table as keyof typeof schema];
     if (!tableSchema) continue;
     try {

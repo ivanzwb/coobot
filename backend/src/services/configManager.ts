@@ -74,7 +74,7 @@ export class ConfigManager {
   async ensureWorkspaceInitialized(): Promise<void> {
     const workspacePath = this.config.workspacePath;
 
-    const subdirs = ['config', 'agents', 'models', 'knowledge', 'logs', 'backup', 'data'];
+    const subdirs = ['config', 'agents', 'knowledge', 'logs', 'backup', 'data'];
 
     for (const subdir of subdirs) {
       const fullPath = path.join(workspacePath, subdir);

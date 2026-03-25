@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { memoryEngine, taskOrchestrator, leaderAgent } from '../services/index.js';
+import { memoryEngine, taskOrchestrator, leaderAgent, logger } from '../services/index.js';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 
@@ -8,6 +8,8 @@ const router = Router();
 router.post('/', async (req: Request, res: Response) => {
   try {
     const { content, attachments } = req.body;
+
+    logger.info('Chat', 'User input received', { content, attachments });
 
     const messageId = await memoryEngine.appendMessage('user', content, attachments);
 

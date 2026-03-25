@@ -98,7 +98,7 @@ const AgentsView: React.FC = () => {
 
   const loadToolPermissions = async (agentId: string) => {
     try {
-      const response = await fetch(`/api/v1/tool-permissions/${agentId}`);
+      const response = await fetch(`/api/v1/tools/permissions/${agentId}`);
       const data = await response.json();
       setToolPermissions(data);
     } catch (error) {
@@ -109,7 +109,7 @@ const AgentsView: React.FC = () => {
   const handleToolPermissionChange = async (toolName: string, policy: string) => {
     if (!selectedAgent) return;
     try {
-      await fetch(`/api/v1/tool-permissions/${selectedAgent.id}`, {
+      await fetch(`/api/v1/tools/permissions/${selectedAgent.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ toolName, policy }),
