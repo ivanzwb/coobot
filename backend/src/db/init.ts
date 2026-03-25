@@ -1,240 +1,203 @@
-import { db } from '../db/index.js';
-import { agents, skills, permissionPolicies, systemConfigs, promptTemplates, promptVersions } from '../db/schema.js';
-import { v4 as uuidv4 } from 'uuid';
-import { pathToFileURL } from 'node:url';
-import fs from 'node:fs';
-import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import Database from 'better-sqlite3';
+import * as path from 'path';
 
-async function initializeBuiltInPromptTemplates() {
-  const candidates = [
-    path.resolve(process.cwd(), 'prompt_templates'),
-    path.resolve(process.cwd(), 'backend', 'prompt_templates')
-  ];
+const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'data/biosbot.db');
 
-  const templateDir = candidates.find((dirPath) => fs.existsSync(dirPath));
-  if (!templateDir) {
-    console.log('[Init] prompt_templates directory not found, skip built-in prompt initialization');
-    return;
-  }
+const db = new Database(dbPath);
 
-  const files = fs.readdirSync(templateDir)
-    .filter((fileName) => fileName.toLowerCase().endsWith('.md'));
+const schema = `
+CREATE TABLE IF NOT EXISTS agents (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  model_config_json TEXT NOT NULL,
+  prompt_template_id TEXT,
+  status TEXT DEFAULT 'IDLE',
+  created_at INTEGER,
+  updated_at INTEGER
+);
 
-  if (files.length === 0) {
-    console.log('[Init] No built-in prompt markdown files found, skip');
-    return;
-  }
+CREATE TABLE IF NOT EXISTS agent_capabilities (
+  agent_id TEXT PRIMARY KEY REFERENCES agents(id),
+  skills_json TEXT NOT NULL,
+  tools_json TEXT NOT NULL,
+  description TEXT,
+  constraints TEXT,
+  last_heartbeat INTEGER,
+  status TEXT DEFAULT 'OFFLINE',
+  updated_at INTEGER
+);
 
-  let createdCount = 0;
+CREATE TABLE IF NOT EXISTS skills (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  version TEXT,
+  author TEXT,
+  runtime_language TEXT,
+  detected_language TEXT,
+  install_mode TEXT DEFAULT 'copy_only',
+  root_dir TEXT NOT NULL,
+  entrypoint TEXT,
+  config_schema_json TEXT,
+  tool_manifest_json TEXT,
+  compatibility TEXT,
+  installed_at INTEGER,
+  updated_at INTEGER,
+  enabled INTEGER DEFAULT 1
+);
 
-  for (const fileName of files) {
-    const filePath = path.join(templateDir, fileName);
-    const content = fs.readFileSync(filePath, 'utf-8').trim();
-    if (!content) {
-      continue;
-    }
+CREATE TABLE IF NOT EXISTS agent_skills (
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  skill_id TEXT NOT NULL REFERENCES skills(id),
+  config_json TEXT,
+  PRIMARY KEY (agent_id, skill_id)
+);
 
-    const name = path.basename(fileName, path.extname(fileName));
-    const [existing] = await db.select({ id: promptTemplates.id })
-      .from(promptTemplates)
-      .where(eq(promptTemplates.name, name))
-      .limit(1);
+CREATE TABLE IF NOT EXISTS prompts (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  content TEXT NOT NULL,
+  variables_json TEXT,
+  tags TEXT,
+  created_at INTEGER,
+  updated_at INTEGER
+);
 
-    if (existing) {
-      continue;
-    }
+CREATE TABLE IF NOT EXISTS agent_tool_permissions (
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  tool_name TEXT NOT NULL,
+  policy TEXT NOT NULL,
+  updated_at INTEGER,
+  PRIMARY KEY (agent_id, tool_name)
+);
 
-    const now = new Date();
-    const templateId = uuidv4();
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,
+  parent_task_id TEXT,
+  root_task_id TEXT NOT NULL,
+  assigned_agent_id TEXT NOT NULL REFERENCES agents(id),
+  status TEXT NOT NULL,
+  trigger_mode TEXT DEFAULT 'immediate',
+  input_payload TEXT,
+  output_summary TEXT,
+  error_msg TEXT,
+  retry_count INTEGER DEFAULT 0,
+  heartbeat INTEGER,
+  created_at INTEGER,
+  updated_at INTEGER,
+  started_at INTEGER,
+  finished_at INTEGER
+);
 
-    await db.insert(promptTemplates).values({
-      id: templateId,
-      name,
-      type: 'domain',
-      description: '系统内置 Prompt 模板（从 prompt_templates/*.md 初始化）',
-      currentVersion: 1,
-      createdAt: now,
-      updatedAt: now
-    });
+CREATE TABLE IF NOT EXISTS task_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  step_index INTEGER NOT NULL,
+  step_type TEXT NOT NULL,
+  content TEXT NOT NULL,
+  tool_name TEXT,
+  tool_args_json TEXT,
+  timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+);
 
-    await db.insert(promptVersions).values({
-      id: uuidv4(),
-      templateId,
-      version: 1,
-      system: content,
-      slots: JSON.stringify([]),
-      changeLog: '系统初始化导入内置模板',
-      createdAt: now
-    });
+CREATE TABLE IF NOT EXISTS knowledge_files (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  file_name TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  file_hash TEXT,
+  vector_partition TEXT NOT NULL,
+  status TEXT,
+  version INTEGER DEFAULT 1,
+  meta_info_json TEXT,
+  created_at INTEGER
+);
 
-    createdCount += 1;
-  }
+CREATE TABLE IF NOT EXISTS session_memory (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  role TEXT,
+  content TEXT NOT NULL,
+  attachments_json TEXT,
+  related_task_id TEXT REFERENCES tasks(id),
+  meta_json TEXT,
+  summary TEXT,
+  token_count INTEGER NOT NULL,
+  importance REAL DEFAULT 0.5,
+  created_at INTEGER,
+  is_archived INTEGER DEFAULT 0,
+  ltm_ref_id TEXT
+);
 
-  console.log(`[Init] Built-in prompt templates initialized: created ${createdCount}, scanned ${files.length}`);
-}
+CREATE TABLE IF NOT EXISTS long_term_memory (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  category TEXT,
+  key_text TEXT NOT NULL,
+  value TEXT NOT NULL,
+  embedding_id TEXT NOT NULL,
+  confidence REAL,
+  access_count INTEGER DEFAULT 0,
+  last_accessed INTEGER,
+  is_active INTEGER DEFAULT 1,
+  created_at INTEGER
+);
 
-export async function initializeDatabase() {
-  console.log('[Init] Starting database initialization...');
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  task_id TEXT,
+  details_json TEXT,
+  result TEXT,
+  timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+);
 
-  const existingAgents = await db.select().from(agents).limit(1);
-  if (existingAgents.length > 0) {
-    await initializeBuiltInPromptTemplates();
-    console.log('[Init] Database already initialized');
-    return;
-  }
+CREATE TABLE IF NOT EXISTS scheduled_jobs (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  cron_expression TEXT NOT NULL,
+  timezone TEXT DEFAULT 'UTC',
+  task_template_json TEXT NOT NULL,
+  enabled INTEGER DEFAULT 1,
+  concurrency_policy TEXT DEFAULT 'FORBID',
+  last_run_at INTEGER,
+  next_run_at INTEGER NOT NULL,
+  created_at INTEGER,
+  updated_at INTEGER
+);
 
-  const leaderAgentId = uuidv4();
-  await db.insert(agents).values({
-    id: leaderAgentId,
-    type: 'leader',
-    name: 'Leader Agent',
-    model: 'gpt-4',
-    temperature: 0.7,
-    skills: JSON.stringify([]),
-    knowledgeBases: JSON.stringify([]),
-    status: 'active',
-    isSystem: true
-  });
+CREATE TABLE IF NOT EXISTS job_execution_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT NOT NULL REFERENCES scheduled_jobs(id),
+  scheduled_time INTEGER NOT NULL,
+  actual_start_time INTEGER,
+  actual_end_time INTEGER,
+  triggered_task_id TEXT REFERENCES tasks(id),
+  status TEXT NOT NULL,
+  error_message TEXT,
+  retry_count INTEGER DEFAULT 0,
+  created_at INTEGER
+);
 
-  const domainAgents = [
-    { id: uuidv4(), name: 'Code Agent', type: 'domain' },
-    { id: uuidv4(), name: 'Document Agent', type: 'domain' },
-    { id: uuidv4(), name: 'Search Agent', type: 'domain' },
-    { id: uuidv4(), name: 'Analysis Agent', type: 'domain' }
-  ];
+CREATE TABLE IF NOT EXISTS models (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model_name TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  capabilities_json TEXT,
+  status TEXT DEFAULT 'offline',
+  context_window INTEGER,
+  created_at INTEGER,
+  updated_at INTEGER
+);
+`;
 
-  for (const agent of domainAgents) {
-    await db.insert(agents).values({
-      id: agent.id,
-      type: agent.type,
-      name: agent.name,
-      model: 'gpt-4',
-      temperature: 0.7,
-      skills: JSON.stringify([]),
-      knowledgeBases: JSON.stringify([]),
-      status: 'active',
-      isSystem: true
-    });
-  }
+db.exec(schema);
+db.close();
 
-  const defaultSkills = [
-    {
-      id: 'skill-code',
-      name: '代码技能',
-      description: '用于代码编写、调试和优化',
-      instructions: '你是一个代码助手，可以帮助用户编写和调试代码。',
-      permissions: JSON.stringify({ read: 'allow', write: 'ask', execute: 'deny' }),
-      tools: JSON.stringify([])
-    },
-    {
-      id: 'skill-document',
-      name: '文档技能',
-      description: '用于文档生成和处理',
-      instructions: '你是一个文档助手，可以帮助用户生成和处理各类文档。',
-      permissions: JSON.stringify({ read: 'allow', write: 'ask', execute: 'deny' }),
-      tools: JSON.stringify([])
-    },
-    {
-      id: 'skill-search',
-      name: '搜索技能',
-      description: '用于信息检索和搜索',
-      instructions: '你是一个搜索助手，可以帮助用户检索和查找信息。',
-      permissions: JSON.stringify({ read: 'allow', write: 'deny', execute: 'deny' }),
-      tools: JSON.stringify([])
-    }
-  ];
-
-  for (const skill of defaultSkills) {
-    await db.insert(skills).values({
-      id: skill.id,
-      name: skill.name,
-      description: skill.description,
-      instructions: skill.instructions,
-      permissions: skill.permissions,
-      tools: skill.tools,
-      status: 'active'
-    });
-  }
-
-  const defaultPolicies = [
-    {
-      id: uuidv4(),
-      name: 'Allow Read Operations',
-      priority: 10,
-      readAction: 'allow',
-      writeAction: 'ask',
-      executeAction: 'ask'
-    },
-    {
-      id: uuidv4(),
-      name: 'Prompt on Write',
-      priority: 20,
-      readAction: 'allow',
-      writeAction: 'ask',
-      executeAction: 'ask'
-    },
-    {
-      id: uuidv4(),
-      name: 'Deny Execute by Default',
-      priority: 30,
-      readAction: 'allow',
-      writeAction: 'ask',
-      executeAction: 'ask'
-    }
-  ];
-
-  for (const policy of defaultPolicies) {
-    await db.insert(permissionPolicies).values({
-      id: policy.id,
-      name: policy.name,
-      priority: policy.priority,
-      readAction: policy.readAction,
-      writeAction: policy.writeAction,
-      executeAction: policy.executeAction
-    });
-  }
-
-  const defaultConfigs = [
-    { key: 'llm.defaultModel', value: 'gpt-4', description: 'Default LLM model' },
-    { key: 'llm.temperature', value: '0.7', description: 'Default temperature' },
-    { key: 'scheduler.scanIntervalMs', value: '5000', description: 'Scan interval in ms' },
-    { key: 'execution.maxConcurrentTasks', value: '3', description: 'Max concurrent tasks' },
-    { key: 'execution.defaultTimeout', value: '300000', description: 'Default execution timeout in ms' },
-    { key: 'memory.consolidationEnabled', value: 'true', description: 'Enable memory consolidation' },
-    { key: 'knowledge.maxResults', value: '10', description: 'Max knowledge search results' }
-  ];
-
-  for (const config of defaultConfigs) {
-    await db.insert(systemConfigs).values({
-      id: uuidv4(),
-      key: config.key,
-      value: config.value,
-      description: config.description
-    });
-  }
-
-  await initializeBuiltInPromptTemplates();
-
-  console.log('[Init] Database initialized successfully');
-  console.log(`[Init] Created ${1 + domainAgents.length} agents`);
-  console.log(`[Init] Created ${defaultSkills.length} skills`);
-  console.log(`[Init] Created ${defaultPolicies.length} policies`);
-  console.log(`[Init] Created ${defaultConfigs.length} system configs`);
-}
-
-const isDirectExecution = process.argv[1]
-  ? import.meta.url === pathToFileURL(process.argv[1]).href
-  : false;
-
-if (isDirectExecution) {
-  initializeDatabase()
-    .then(() => {
-      console.log('[Init] Initialization complete');
-      process.exit(0);
-    })
-    .catch((error) => {
-      console.error('[Init] Initialization failed:', error);
-      process.exit(1);
-    });
-}
+console.log('Database tables created successfully!');

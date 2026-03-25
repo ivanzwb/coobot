@@ -1,37 +1,22 @@
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
-import * as schema from './schema.js';
-import path from 'path';
-import fs from 'fs';
+import * as schema from './schema';
 
-const dbPath = process.env.DB_PATH || './data/biosbot.db';
-const dbDir = path.dirname(dbPath);
-
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
-}
-
-const sqlite = new Database(dbPath);
+const sqlite = new Database(process.env.DB_PATH || './data/biosbot.db');
 sqlite.pragma('journal_mode = WAL');
-sqlite.exec(`
-  CREATE TABLE IF NOT EXISTS knowledge_import_history (
-    id TEXT PRIMARY KEY,
-    file_name TEXT NOT NULL,
-    mime_type TEXT,
-    agent_id TEXT,
-    status TEXT NOT NULL DEFAULT 'processing',
-    message TEXT,
-    document_id TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY (document_id) REFERENCES knowledge_documents(id)
-  );
-`);
 
 export const db = drizzle(sqlite, { schema });
 
-export const closeDb = () => {
-  sqlite.close();
-};
+export type Agent = typeof schema.agents.$inferSelect;
+export type NewAgent = typeof schema.agents.$inferInsert;
+export type Task = typeof schema.tasks.$inferSelect;
+export type NewTask = typeof schema.tasks.$inferInsert;
+export type Skill = typeof schema.skills.$inferSelect;
+export type Prompt = typeof schema.prompts.$inferSelect;
+export type KnowledgeFile = typeof schema.knowledgeFiles.$inferSelect;
+export type SessionMessage = typeof schema.sessionMemory.$inferSelect;
+export type LongTermMemory = typeof schema.longTermMemory.$inferSelect;
+export type ScheduledJob = typeof schema.scheduledJobs.$inferSelect;
+export type Model = typeof schema.models.$inferSelect;
 
-export default db;
+export { schema };

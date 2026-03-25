@@ -1,115 +1,102 @@
-import express, { type Request, type Response, type NextFunction } from 'express';
+import express from 'express';
 import cors from 'cors';
-import fileUpload from 'express-fileupload';
+import dotenv from 'dotenv';
+import * as path from 'path';
+import * as fs from 'fs';
+import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';
-import { router } from './routes/index.js';
-import { setupWebSocket, closeWebSocket } from './websocket.js';
-import { schedulerService, memoryConsolidationService } from './services/index.js';
-import { closeDb } from './db/index.js';
-import config from 'config';
-import pino from 'pino';
+import routes from './routes/index.js';
+import { configManager, initializeDatabase, schedulerService, agentCapabilityRegistry, taskOrchestrator, vectorStore, monitorService, memoryEngine, logger } from './services/index.js';
+import { eventBus } from './services/eventBus.js';
 
-const logger = pino({ level: (config.get('log.level') as string) || 'info' });
+dotenv.config();
 
 const app = express();
-const port = (config.get('server.port') as number) || 3001;
-const host = (config.get('server.host') as string) || 'localhost';
+const PORT = parseInt(process.env.PORT || '3001');
 
 app.use(cors());
-app.use(fileUpload({ limits: { fileSize: 50 * 1024 * 1024 } }));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-app.use((req, res, next) => {
-  const start = Date.now();
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    logger.info(`${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
-  });
-  next();
-});
+const workspacePath = configManager.getWorkspacePath();
+const dataDir = path.join(workspacePath, 'data');
 
-app.use(router);
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
 
-app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  logger.error(err);
-  res.status(500).json({
-    error: {
-      code: 'INTERNAL_ERROR',
-      message: err.message || 'Internal server error'
-    }
-  });
-});
+process.env.DB_PATH = path.join(dataDir, 'biosbot.db');
 
-const server = createServer(app);
-
-let memoryConsolidationTimer: NodeJS.Timeout | null = null;
-let memoryConsolidationBootTimer: NodeJS.Timeout | null = null;
-
-async function runDailyMemoryConsolidation() {
+async function bootstrap() {
   try {
-    const result = await memoryConsolidationService.consolidateDailyMemories();
-    logger.info({
-      totalConversations: result.totalConversations,
-      totalMessages: result.totalMessages,
-      memoriesCreated: result.memoriesCreated,
-      summary: result.summary
-    }, 'Daily memory consolidation completed');
-  } catch (error: any) {
-    logger.error({ error: error?.message || String(error) }, 'Daily memory consolidation failed');
+    logger.initialize();
+    logger.info('Bootstrap', 'Starting BiosBot server...');
+    
+    await configManager.load();
+    await configManager.ensureWorkspaceInitialized();
+    
+    await initializeDatabase();
+    await vectorStore.initialize();
+    await agentCapabilityRegistry.loadFromDatabase();
+    
+    schedulerService.start();
+    monitorService.startMonitoring();
+    
+    setInterval(() => {
+      memoryEngine.archiveEligibleHistory().catch(err => {
+        logger.error('Archive', 'Failed to archive history', err);
+      });
+    }, 60 * 60 * 1000);
+
+    app.use('/api', routes);
+
+    const server = createServer(app);
+
+    const wss = new WebSocketServer({ server, path: '/ws' });
+    
+    wss.on('connection', (ws: WebSocket) => {
+      logger.info('WebSocket', 'Client connected');
+      eventBus.addClient(ws);
+
+      ws.on('message', (message: string) => {
+        try {
+          const data = JSON.parse(message.toString());
+          logger.debug('WebSocket', 'Received message', data);
+          
+          if (data.type === 'subscribe_task' && data.taskId) {
+            ws.send(JSON.stringify({
+              type: 'subscribed',
+              taskId: data.taskId,
+            }));
+          }
+        } catch (e) {
+          logger.error('WebSocket', 'Failed to parse message', e);
+        }
+      });
+
+      ws.on('close', () => {
+        logger.info('WebSocket', 'Client disconnected');
+        eventBus.removeClient(ws);
+      });
+    });
+
+    server.listen(PORT, () => {
+      logger.info('Server', `Server running on http://localhost:${PORT}`);
+      logger.info('Server', `WebSocket running on ws://localhost:${PORT}/ws`);
+      logger.info('Server', `Workspace: ${workspacePath}`);
+    });
+
+  } catch (error) {
+    logger.error('Bootstrap', 'Failed to start server', error);
+    process.exit(1);
   }
 }
-
-function scheduleDailyMemoryConsolidation() {
-  const now = new Date();
-  const next = new Date(now);
-  next.setDate(now.getDate() + 1);
-  next.setHours(0, 10, 0, 0);
-  const delayMs = Math.max(10_000, next.getTime() - now.getTime());
-
-  memoryConsolidationBootTimer = setTimeout(async () => {
-    await runDailyMemoryConsolidation();
-    memoryConsolidationTimer = setInterval(runDailyMemoryConsolidation, 24 * 60 * 60 * 1000);
-  }, delayMs);
-
-  logger.info({ nextRunAt: next.toISOString() }, 'Daily memory consolidation scheduled');
-}
-
-function stopMemoryConsolidationSchedule() {
-  if (memoryConsolidationBootTimer) {
-    clearTimeout(memoryConsolidationBootTimer);
-    memoryConsolidationBootTimer = null;
-  }
-  if (memoryConsolidationTimer) {
-    clearInterval(memoryConsolidationTimer);
-    memoryConsolidationTimer = null;
-  }
-}
-
-setupWebSocket(server);
-
-schedulerService.start();
-scheduleDailyMemoryConsolidation();
-
-server.listen(port, host, () => {
-  logger.info(`BiosBot server running on http://${host}:${port}`);
-  logger.info(`WebSocket server running on ws://${host}:${port}/ws`);
-});
 
 process.on('SIGINT', () => {
-  logger.info('Shutting down...');
-  stopMemoryConsolidationSchedule();
+  logger.info('Server', 'Shutting down...');
   schedulerService.stop();
-  closeWebSocket();
-  closeDb();
+  taskOrchestrator.destroy();
   process.exit(0);
 });
 
-process.on('SIGTERM', () => {
-  logger.info('Shutting down...');
-  stopMemoryConsolidationSchedule();
-  schedulerService.stop();
-  closeWebSocket();
-  closeDb();
-  process.exit(0);
-});
+bootstrap();
