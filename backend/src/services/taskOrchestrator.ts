@@ -4,10 +4,13 @@ import { eq } from 'drizzle-orm';
 import type { TaskStatus, TaskInput, DAGNode, DomainAgentProfile, IntentResult } from '../types';
 import type { Task } from '../db';
 import { agentCapabilityRegistry } from './agentCapabilityRegistry';
+import { agentRuntime } from './agentRuntime';
 import { EventEmitter } from 'events';
 import { eventBus } from './eventBus.js';
 import { leaderAgent } from './leaderAgent.js';
 import { logger } from './logger.js';
+import { memoryEngine } from './memoryEngine.js';
+import { knowledgeEngine } from './knowledgeEngine.js';
 
 export class TaskOrchestrator extends EventEmitter {
   private taskQueue: Map<string, Task> = new Map();
@@ -212,6 +215,7 @@ export class TaskOrchestrator extends EventEmitter {
     const task = this.taskQueue.get(taskId);
     if (!task) return;
 
+    const previousStatus = task.status;
     task.status = status;
     task.updatedAt = new Date();
 
@@ -240,6 +244,10 @@ export class TaskOrchestrator extends EventEmitter {
       .set(updateData)
       .where(eq(schema.tasks.id, taskId));
 
+    if ((status === 'COMPLETED' || status === 'TERMINATED' || status === 'EXCEPTION') && task.assignedAgentId !== 'LEADER') {
+      await this.processAgentQueue(task.assignedAgentId);
+    }
+
     this.emit('task_status_changed', { taskId, status });
     eventBus.emitTaskStatus({
       taskId,
@@ -247,6 +255,59 @@ export class TaskOrchestrator extends EventEmitter {
       agentId: task.assignedAgentId,
       timestamp: new Date(),
     });
+  }
+
+  private async processAgentQueue(agentId: string): Promise<void> {
+    const nextTaskId = await this.dequeueFromAgent(agentId);
+    
+    if (nextTaskId) {
+      await this.updateAgentStatus(agentId, 'RUNNING');
+      
+      const nextTask = this.taskQueue.get(nextTaskId);
+      if (nextTask) {
+        await this.updateTaskStatus(nextTaskId, 'RUNNING');
+        
+        const agents = await db.select()
+          .from(schema.agents)
+          .where(eq(schema.agents.id, agentId));
+        
+        if (agents.length > 0) {
+          const agentConfig = await this.buildAgentConfig(agents[0]);
+          await agentRuntime.executeTask(nextTask, agentConfig);
+        }
+      }
+    } else {
+      await this.updateAgentStatus(agentId, 'IDLE');
+    }
+  }
+
+  private async buildAgentConfig(agent: any): Promise<any> {
+    let modelConfig = null;
+    if (agent.modelConfigId) {
+      const configs = await db.select()
+        .from(schema.modelConfigs)
+        .where(eq(schema.modelConfigs.id, agent.modelConfigId));
+      if (configs.length > 0) {
+        const c = configs[0];
+        modelConfig = {
+          provider: c.provider,
+          modelName: c.modelName,
+          baseUrl: c.baseUrl || undefined,
+          apiKey: c.apiKey || undefined,
+          contextWindow: c.contextWindow || 4096,
+        };
+      }
+    }
+
+    return {
+      id: agent.id,
+      name: agent.name,
+      type: agent.type,
+      modelConfig,
+      promptTemplateId: agent.promptTemplateId,
+      skills: [],
+      tools: [],
+    };
   }
 
   async updateTaskHeartbeat(taskId: string): Promise<void> {
@@ -260,11 +321,20 @@ export class TaskOrchestrator extends EventEmitter {
       .where(eq(schema.tasks.id, taskId));
   }
 
+  async updateAgentStatus(agentId: string, status: 'IDLE' | 'RUNNING' | 'BUSY_WITH_QUEUE'): Promise<void> {
+    await db.update(schema.agents)
+      .set({ status, updatedAt: new Date() })
+      .where(eq(schema.agents.id, agentId));
+    
+    logger.info('TaskOrchestrator', 'Agent status updated', { agentId, status });
+  }
+
   async terminateTask(taskId: string): Promise<void> {
     const task = this.taskQueue.get(taskId);
     if (!task) return;
 
-    await this.updateTaskStatus(taskId, 'TERMINATED');
+    const report = await this.generateTerminationReport(taskId);
+    await this.updateTaskStatus(taskId, 'TERMINATED', `Task terminated. Report: ${JSON.stringify(report)}`);
 
     if (task.assignedAgentId !== 'LEADER') {
       const queue = this.agentQueues.get(task.assignedAgentId);
@@ -274,6 +344,8 @@ export class TaskOrchestrator extends EventEmitter {
           queue.splice(index, 1);
         }
       }
+
+      await this.releaseAgentResources(task.assignedAgentId);
     }
 
     const subtasks = await db.select().from(schema.tasks)
@@ -285,7 +357,49 @@ export class TaskOrchestrator extends EventEmitter {
       }
     }
 
-    this.emit('task_terminated', taskId);
+    this.emit('task_terminated', taskId, report);
+  }
+
+  async generateTerminationReport(taskId: string): Promise<{
+    taskId: string;
+    completedSteps: number;
+    interruptionPoint: string;
+    resourceReleased: boolean;
+    timestamp: string;
+  }> {
+    const taskLogs = await db.select()
+      .from(schema.taskLogs)
+      .where(eq(schema.taskLogs.taskId, taskId))
+      .orderBy(schema.taskLogs.stepIndex);
+
+    const completedSteps = taskLogs.length;
+    const lastStep = taskLogs[taskLogs.length - 1];
+    const interruptionPoint = lastStep 
+      ? `Step ${lastStep.stepIndex}: ${lastStep.stepType} - ${lastStep.content.substring(0, 100)}`
+      : 'No steps executed';
+
+    const task = await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId));
+    const agentId = task[0]?.assignedAgentId;
+
+    return {
+      taskId,
+      completedSteps,
+      interruptionPoint,
+      resourceReleased: true,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  private async releaseAgentResources(agentId: string): Promise<void> {
+    const runningTask = Array.from(this.taskQueue.values())
+      .find(t => t.assignedAgentId === agentId && t.status === 'RUNNING');
+    
+    if (runningTask) {
+      this.taskQueue.delete(runningTask.id);
+    }
+
+    await this.updateAgentStatus(agentId, 'IDLE');
+    await this.processAgentQueue(agentId);
   }
 
   private async handleTimeout(): Promise<void> {
@@ -357,6 +471,45 @@ export class TaskOrchestrator extends EventEmitter {
     }
     if (this.leaderProcessingInterval) {
       clearInterval(this.leaderProcessingInterval);
+    }
+  }
+
+  async extractTaskSummary(taskId: string): Promise<void> {
+    try {
+      const task = await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId));
+      if (!task.length || task[0].status !== 'COMPLETED') return;
+
+      const taskLogs = await db.select()
+        .from(schema.taskLogs)
+        .where(eq(schema.taskLogs.taskId, taskId))
+        .orderBy(schema.taskLogs.stepIndex);
+
+      const observations = taskLogs
+        .filter(log => log.stepType === 'OBSERVATION')
+        .map(log => log.content)
+        .join('\n');
+
+      if (observations.length > 50) {
+        const summary = `Task completed. Key observations: ${observations.substring(0, 500)}`;
+        
+        await memoryEngine.appendMessage(
+          'assistant',
+          summary,
+          undefined,
+          taskId
+        );
+
+        if (task[0].outputSummary) {
+          await memoryEngine.addFact(
+            task[0].assignedAgentId,
+            'task_completion',
+            task[0].outputSummary,
+            { taskId, completedAt: new Date().toISOString() }
+          );
+        }
+      }
+    } catch (error) {
+      logger.error('TaskOrchestrator', 'Failed to extract task summary', error);
     }
   }
 }

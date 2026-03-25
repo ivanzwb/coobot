@@ -7,10 +7,47 @@ import type { KnowledgeFile } from '../db';
 import { configManager } from './configManager';
 import { vectorStore, type VectorChunk } from './vectorStore';
 
+export interface VersionConflict {
+  existingFile: KnowledgeFile;
+  requiresDecision: true;
+}
+
 export class KnowledgeEngine {
   private supportedFileTypes = ['.txt', '.md', '.pdf', '.docx', '.png', '.jpg', '.jpeg'];
 
-  async ingestFile(file: { path: string; name: string }, agentId: string): Promise<KnowledgeFile> {
+  async checkVersionConflict(fileName: string, agentId: string): Promise<VersionConflict | null> {
+    const existing = await db.select()
+      .from(schema.knowledgeFiles)
+      .where(
+        and(
+          eq(schema.knowledgeFiles.agentId, agentId),
+          eq(schema.knowledgeFiles.fileName, fileName)
+        )
+      );
+
+    if (existing.length > 0) {
+      return {
+        existingFile: existing[0] as unknown as KnowledgeFile,
+        requiresDecision: true,
+      };
+    }
+    return null;
+  }
+
+  async ingestFile(file: { path: string; name: string }, agentId: string, overwriteVersion?: string): Promise<KnowledgeFile> {
+    const conflict = await this.checkVersionConflict(file.name, agentId);
+    
+    if (conflict && !overwriteVersion) {
+      throw new Error('VERSION_CONFLICT:' + JSON.stringify({
+        existingFileId: conflict.existingFile.id,
+        existingFileName: conflict.existingFile.fileName,
+        existingVersion: conflict.existingFile.version,
+      }));
+    }
+
+    if (overwriteVersion && conflict) {
+      await this.deleteFile(conflict.existingFile.id, false);
+    }
     const fileId = uuidv4();
     const workspacePath = configManager.getWorkspacePath();
     const knowledgeDir = path.join(workspacePath, 'knowledge', agentId);
@@ -148,16 +185,20 @@ export class KnowledgeEngine {
 
   async search(query: string, agentId: string, topK: number = 5): Promise<{ content: string; source: string; score: number; metadata?: Record<string, unknown> }[]> {
     try {
+      const agent = await db.select().from(schema.agents).where(eq(schema.agents.id, agentId));
+      const agentName = agent[0]?.name || 'Unknown';
+      
       const vectorResults = await vectorStore.search(agentId, query, topK);
       
       return vectorResults.map(r => ({
         content: r.text,
-        source: `${r.metadata.fileName}${r.metadata.page ? `, 第 ${r.metadata.page} 页` : ''}`,
+        source: `依据：${agentName} 知识库 -> ${r.metadata.fileName}${r.metadata.page ? `, 第 ${r.metadata.page} 页` : ''}, 第 ${(r.metadata.chunkIndex || 0) + 1} 条`,
         score: r.score,
         metadata: {
           fileId: r.metadata.fileId,
           page: r.metadata.page,
           chunkIndex: r.metadata.chunkIndex,
+          agentName,
         },
       }));
     } catch (error) {

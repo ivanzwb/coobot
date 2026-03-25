@@ -14,16 +14,25 @@ router.get('/:agentId/files', async (req: Request, res: Response) => {
 
 router.post('/:agentId/upload', async (req: Request, res: Response) => {
   try {
-    const { file } = req.body;
+    const { file, overwriteVersion } = req.body;
     
     const knowledgeFile = await knowledgeEngine.ingestFile(
       file,
-      req.params.agentId
+      req.params.agentId,
+      overwriteVersion
     );
 
     res.status(201).json(knowledgeFile);
   } catch (error) {
-    res.status(500).json({ error: String(error) });
+    const errorStr = String(error);
+    if (errorStr.startsWith('VERSION_CONFLICT:')) {
+      const conflictData = JSON.parse(errorStr.replace('VERSION_CONFLICT:', ''));
+      return res.status(409).json({ 
+        error: 'VERSION_CONFLICT', 
+        ...conflictData 
+      });
+    }
+    res.status(500).json({ error: errorStr });
   }
 });
 

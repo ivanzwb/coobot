@@ -12,9 +12,9 @@ export interface ModelConfigRecord {
   baseUrl: string | null;
   apiKey: string | null;
   contextWindow: number | null;
-  status: string;
-  createdAt: Date;
-  updatedAt: Date;
+  status: string | null;
+  createdAt: Date | null;
+  updatedAt: Date | null;
 }
 
 export interface ModelConfig {

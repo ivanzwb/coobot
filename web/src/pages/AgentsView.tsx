@@ -3,6 +3,12 @@ import { useAppStore } from '../stores/appStore';
 import { modelsApi, knowledgeApi } from '../api';
 import type { Model } from '../types';
 
+interface PromptTemplate {
+  id: string;
+  name: string;
+  description: string;
+}
+
 interface Skill {
   id: string;
   name: string;
@@ -22,18 +28,24 @@ const AgentsView: React.FC = () => {
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [showSkillsModal, setShowSkillsModal] = useState(false);
   const [showKnowledgeModal, setShowKnowledgeModal] = useState(false);
+  const [showToolsModal, setShowToolsModal] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<any>(null);
   const [newAgentName, setNewAgentName] = useState('');
   const [models, setModels] = useState<Model[]>([]);
+  const [prompts, setPrompts] = useState<PromptTemplate[]>([]);
   const [selectedModelId, setSelectedModelId] = useState('');
+  const [selectedPromptId, setSelectedPromptId] = useState('');
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [agentSkills, setAgentSkills] = useState<string[]>([]);
   const [knowledgeFiles, setKnowledgeFiles] = useState<KnowledgeFile[]>([]);
+  const [toolPermissions, setToolPermissions] = useState<{toolName: string; description: string; policy: string}[]>([]);
 
   useEffect(() => {
     fetchAgents();
     loadModels();
     loadSkills();
+    loadPrompts();
   }, [fetchAgents]);
 
   const loadModels = async () => {
@@ -42,6 +54,16 @@ const AgentsView: React.FC = () => {
       setModels(response.data);
     } catch (error) {
       console.error('Failed to load models:', error);
+    }
+  };
+
+  const loadPrompts = async () => {
+    try {
+      const response = await fetch('/api/v1/prompts');
+      const data = await response.json();
+      setPrompts(data);
+    } catch (error) {
+      console.error('Failed to load prompts:', error);
     }
   };
 
@@ -74,17 +96,62 @@ const AgentsView: React.FC = () => {
     }
   };
 
+  const loadToolPermissions = async (agentId: string) => {
+    try {
+      const response = await fetch(`/api/v1/tool-permissions/${agentId}`);
+      const data = await response.json();
+      setToolPermissions(data);
+    } catch (error) {
+      console.error('Failed to load tool permissions:', error);
+    }
+  };
+
+  const handleToolPermissionChange = async (toolName: string, policy: string) => {
+    if (!selectedAgent) return;
+    try {
+      await fetch(`/api/v1/tool-permissions/${selectedAgent.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toolName, policy }),
+      });
+      loadToolPermissions(selectedAgent.id);
+    } catch (error) {
+      console.error('Failed to update tool permission:', error);
+    }
+  };
+
+  const handleManageTools = (agent: any, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSelectedAgent(agent);
+    loadToolPermissions(agent.id);
+    setShowToolsModal(true);
+  };
+
   const handleCreateAgent = async () => {
     if (!newAgentName.trim() || !selectedModelId) return;
 
     try {
-      await createAgent({
+      const agent = await createAgent({
         name: newAgentName,
         type: 'DOMAIN',
         modelConfigId: selectedModelId,
+        promptTemplateId: selectedPromptId || undefined,
       });
+      
+      if (selectedSkillIds.length > 0 && agent?.id) {
+        for (const skillId of selectedSkillIds) {
+          await fetch(`/api/v1/agents/${agent.id}/skills`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ skillId })
+          });
+        }
+      }
+      
       setNewAgentName('');
       setSelectedModelId('');
+      setSelectedPromptId('');
+      setSelectedSkillIds([]);
       setShowModal(false);
       fetchAgents();
     } catch (error) {
@@ -213,6 +280,13 @@ const AgentsView: React.FC = () => {
                 </button>
                 <button
                   className="btn btn-sm"
+                  onClick={(e) => handleManageTools(agent, e)}
+                  style={{ padding: '4px 8px', fontSize: 12 }}
+                >
+                  工具权限
+                </button>
+                <button
+                  className="btn btn-sm"
                   onClick={(e) => handleManageKnowledge(agent, e)}
                   style={{ padding: '4px 8px', fontSize: 12 }}
                 >
@@ -231,9 +305,20 @@ const AgentsView: React.FC = () => {
             </div>
             <div className="agent-tags">
               <span className="tag">{agent.type === 'LEADER' ? 'Leader' : 'Domain'}</span>
-              {agent.capabilities?.skills?.map((skill: string, i: number) => (
-                <span key={i} className="tag">{skill}</span>
-              ))}
+              {agent.modelConfig ? (
+                <span className="tag" style={{ background: '#52c41a' }}>模型✓</span>
+              ) : (
+                <span className="tag" style={{ background: '#ff4d4f' }}>模型✗</span>
+              )}
+              {agent.promptTemplateId ? (
+                <span className="tag" style={{ background: '#52c41a' }}>Prompt✓</span>
+              ) : null}
+              {agent.capabilities?.skills?.length ? (
+                <span className="tag" style={{ background: '#52c41a' }}>Skill({agent.capabilities.skills.length})✓</span>
+              ) : null}
+            </div>
+            <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+              模型: {agent.modelConfig?.name || '未配置'}
             </div>
           </div>
         ))}
@@ -247,10 +332,11 @@ const AgentsView: React.FC = () => {
 
       {showModal && (
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 600 }}>
             <h2 className="modal-title">创建新 Agent</h2>
+            
             <div className="form-group">
-              <label className="form-label">Agent 名称</label>
+              <label className="form-label">Agent 名称 *</label>
               <input
                 type="text"
                 className="form-input"
@@ -260,8 +346,9 @@ const AgentsView: React.FC = () => {
                 autoFocus
               />
             </div>
+
             <div className="form-group">
-              <label className="form-label">选择模型</label>
+              <label className="form-label">选择模型 *</label>
               <select
                 className="form-input"
                 value={selectedModelId}
@@ -275,8 +362,54 @@ const AgentsView: React.FC = () => {
                 ))}
               </select>
             </div>
+
+            <div className="form-group">
+              <label className="form-label">Prompt 模板（可选）</label>
+              <select
+                className="form-input"
+                value={selectedPromptId}
+                onChange={(e) => setSelectedPromptId(e.target.value)}
+              >
+                <option value="">不使用模板</option>
+                {prompts.map(prompt => (
+                  <option key={prompt.id} value={prompt.id}>
+                    {prompt.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Skills（可选）</label>
+              <div style={{ maxHeight: 120, overflowY: 'auto', border: '1px solid #ddd', padding: 8, borderRadius: 4 }}>
+                {skills.length === 0 ? (
+                  <div style={{ color: '#999' }}>暂无可用 Skills</div>
+                ) : (
+                  skills.map(skill => (
+                    <label key={skill.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedSkillIds.includes(skill.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedSkillIds([...selectedSkillIds, skill.id]);
+                          } else {
+                            setSelectedSkillIds(selectedSkillIds.filter(id => id !== skill.id));
+                          }
+                        }}
+                      />
+                      {skill.name}
+                    </label>
+                  ))
+                )}
+              </div>
+            </div>
+
             <div className="modal-actions">
-              <button className="btn" onClick={() => setShowModal(false)}>
+              <button className="btn" onClick={() => {
+                setShowModal(false);
+                setSelectedSkillIds([]);
+              }}>
                 取消
               </button>
               <button
@@ -423,6 +556,44 @@ const AgentsView: React.FC = () => {
             </div>
             <div className="modal-actions">
               <button className="btn" onClick={() => setShowKnowledgeModal(false)}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showToolsModal && selectedAgent && (
+        <div className="modal-overlay" onClick={() => setShowToolsModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 500 }}>
+            <h2 className="modal-title">工具权限 - {selectedAgent.name}</h2>
+            <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+              {toolPermissions.map(tool => (
+                <div key={tool.toolName} style={{ 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'space-between',
+                  padding: '10px 0',
+                  borderBottom: '1px solid #eee'
+                }}>
+                  <div>
+                    <div style={{ fontWeight: 'bold' }}>{tool.toolName}</div>
+                    <div style={{ fontSize: 12, color: '#666' }}>{tool.description}</div>
+                  </div>
+                  <select
+                    value={tool.policy}
+                    onChange={(e) => handleToolPermissionChange(tool.toolName, e.target.value)}
+                    style={{ padding: '4px 8px' }}
+                  >
+                    <option value="ALLOW">允许</option>
+                    <option value="ASK">询问</option>
+                    <option value="DENY">拒绝</option>
+                  </select>
+                </div>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <button className="btn" onClick={() => setShowToolsModal(false)}>
                 关闭
               </button>
             </div>

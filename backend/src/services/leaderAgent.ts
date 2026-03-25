@@ -9,6 +9,7 @@ import { agentRuntime } from './agentRuntime';
 import { memoryEngine } from './memoryEngine';
 import { eventBus } from './eventBus.js';
 import { logger } from './logger.js';
+import { modelHub } from './modelHub.js';
 import OpenAI from 'openai';
 
 const CONFIDENCE_THRESHOLD = 0.7;
@@ -55,6 +56,8 @@ export class LeaderAgent extends EventEmitter {
       }
 
       await taskOrchestrator.dispatchSubtasks(task.id, validation.dag);
+
+      await taskOrchestrator.updateAgentStatus('LEADER', 'IDLE');
 
       await taskOrchestrator.updateTaskStatus(task.id, 'AGGREGATING');
 

@@ -7,6 +7,7 @@ import { eventBus } from './eventBus.js';
 const MEMORY_THRESHOLD = 90;
 const CPU_THRESHOLD = 90;
 const DISK_THRESHOLD = 90;
+const QUEUE_DEPTH_THRESHOLD = 5;
 
 export class MonitorService {
   private monitoringInterval: NodeJS.Timeout | null = null;
@@ -54,6 +55,38 @@ export class MonitorService {
       this.alerted.add('cpu');
     } else if (metrics.cpu < CPU_THRESHOLD * 0.8) {
       this.alerted.delete('cpu');
+    }
+
+    await this.checkQueueDepth();
+  }
+
+  private async checkQueueDepth(): Promise<void> {
+    const agents = await db.select().from(schema.agents);
+    
+    for (const agent of agents) {
+      if (agent.type === 'LEADER') continue;
+      
+      const queuedTasks = await db.select().from(schema.tasks)
+        .where(
+          eq(schema.tasks.assignedAgentId, agent.id)
+        );
+      
+      const queueLength = queuedTasks.filter(t => t.status === 'QUEUED').length;
+      const alertKey = `queue_${agent.id}`;
+      
+      if (queueLength > QUEUE_DEPTH_THRESHOLD && !this.alerted.has(alertKey)) {
+        eventBus.emitResourceAlert({
+          type: 'queue_depth',
+          value: queueLength,
+          threshold: QUEUE_DEPTH_THRESHOLD,
+          timestamp: new Date(),
+          agentId: agent.id,
+          agentName: agent.name,
+        });
+        this.alerted.add(alertKey);
+      } else if (queueLength <= Math.floor(QUEUE_DEPTH_THRESHOLD * 0.8)) {
+        this.alerted.delete(alertKey);
+      }
     }
   }
 

@@ -2,7 +2,8 @@ import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
 import { db, schema } from '../db';
 import { eq, and } from 'drizzle-orm';
-import type { DomainAgentProfile, ModelConfig, IntentResult, DAGNode, PermissionResult } from '../types';
+import type { DomainAgentProfile, IntentResult, DAGNode, PermissionResult } from '../types';
+import type { ModelConfig as DbModelConfig } from '../db';
 import type { Task } from '../db';
 import { agentCapabilityRegistry } from './agentCapabilityRegistry';
 import { knowledgeEngine } from './knowledgeEngine';
@@ -11,6 +12,8 @@ import { toolHub } from './toolHub';
 import { securitySandbox } from './securitySandbox';
 import { taskOrchestrator } from './taskOrchestrator';
 import { modelHub } from './modelHub';
+import { eventBus } from './eventBus.js';
+import OpenAI from 'openai';
 
 export interface ReActStep {
   stepIndex: number;
@@ -33,7 +36,7 @@ export interface AgentConfig {
   id: string;
   name: string;
   type: 'LEADER' | 'DOMAIN';
-  modelConfig: ModelConfig;
+  modelConfig: DbModelConfig;
   promptTemplateId?: string;
   skills: string[];
   tools: string[];
@@ -200,33 +203,25 @@ export class AgentRuntime extends EventEmitter {
     return steps;
   }
 
-  private async callModel(prompt: string, modelConfig: ModelConfig): Promise<string> {
+  private async callModel(prompt: string, modelConfig: DbModelConfig): Promise<string> {
     try {
-      const models = await db.select().from(schema.models);
-      const model = models.find(m => m.modelName === modelConfig.model);
-
-      if (!model) {
-        return 'Model not found. Please configure a model first.';
+      if (!modelConfig || !modelConfig.modelName) {
+        return 'Model not configured. Please configure a model first.';
       }
 
-      const config = JSON.parse(model.configJson);
-      
-      const response = await fetch(`${config.baseUrl || 'http://localhost:11434'}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: modelConfig.model,
-          prompt: prompt,
-          stream: false,
-        }),
+      const client = new OpenAI({
+        apiKey: modelConfig.apiKey || '',
+        baseURL: modelConfig.baseUrl || undefined,
+        timeout: 60000,
       });
 
-      if (!response.ok) {
-        throw new Error(`Model API error: ${response.statusText}`);
-      }
+      const response = await client.chat.completions.create({
+        model: modelConfig.modelName,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.3,
+      });
 
-      const data = await response.json() as { response?: string };
-      return data.response || '';
+      return response.choices[0]?.message?.content || '';
     } catch (error) {
       console.error('Model call failed:', error);
       return `Error calling model: ${error instanceof Error ? error.message : String(error)}`;
@@ -288,6 +283,18 @@ export class AgentRuntime extends EventEmitter {
       toolName: step.toolName || null,
       toolArgsJson: step.toolArgs ? JSON.stringify(step.toolArgs) : null,
       timestamp: new Date(),
+    });
+
+    eventBus.broadcast({
+      type: 'step_logged',
+      data: {
+        taskId,
+        stepIndex: step.stepIndex,
+        stepType: step.stepType,
+        content: step.content,
+        toolName: step.toolName,
+        timestamp: new Date(),
+      },
     });
 
     this.emit('step_logged', { taskId, step });

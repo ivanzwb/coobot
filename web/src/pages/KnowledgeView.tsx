@@ -62,16 +62,16 @@ const KnowledgeView: React.FC = () => {
 
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('agentId', selectedAgent);
 
     try {
-      await axios.post(`/api/v1/knowledge/${selectedAgent}/upload`, {
-        file: {
-          name: file.name,
-        },
+      await axios.post(`/api/v1/knowledge/${selectedAgent}/upload`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
       });
       fetchFiles(selectedAgent);
     } catch (error) {
       console.error('Failed to upload file:', error);
+      alert('上传失败');
     }
   };
 

@@ -23,10 +23,12 @@ export interface StepLoggedEvent {
 }
 
 export interface ResourceAlertEvent {
-  type: 'cpu' | 'memory' | 'disk';
+  type: 'cpu' | 'memory' | 'disk' | 'queue_depth';
   value: number;
   threshold: number;
   timestamp: Date;
+  agentId?: string;
+  agentName?: string;
 }
 
 class EventBus extends EventEmitter {

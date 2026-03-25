@@ -12,6 +12,7 @@ import chatRouter from './chat.js';
 import authRouter from './auth.js';
 import toolPermissionsRouter from './toolPermissions.js';
 import auditRouter from './audit.js';
+import permissionRequestsRouter from './permissionRequests.js';
 
 const router = Router();
 
@@ -28,5 +29,6 @@ router.use('/v1/chat', chatRouter);
 router.use('/v1/auth', authRouter);
 router.use('/v1/tools/permissions', toolPermissionsRouter);
 router.use('/v1/audit', auditRouter);
+router.use('/v1/permissions', permissionRequestsRouter);
 
 export default router;

@@ -146,13 +146,26 @@ router.put('/:id', async (req: Request, res: Response) => {
       })
       .where(eq(schema.agents.id, req.params.id));
 
-    const agent = await db.select()
+    const agents = await db.select()
       .from(schema.agents)
       .where(eq(schema.agents.id, req.params.id));
 
-    const agentWithConfig = await enhanceAgentWithConfig(agent[0]);
+    if (agents.length === 0) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
 
-    res.json(agentWithConfig);
+    const agent = agents[0];
+    let modelConfig = null;
+    if (agent.modelConfigId) {
+      const configs = await db.select()
+        .from(schema.modelConfigs)
+        .where(eq(schema.modelConfigs.id, agent.modelConfigId));
+      if (configs.length > 0) {
+        modelConfig = configs[0];
+      }
+    }
+
+    res.json({ ...agent, modelConfig });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }

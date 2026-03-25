@@ -19,6 +19,7 @@ export { contextAssemblyEngine, ContextAssemblyEngine } from './contextAssemblyE
 export { vectorStore, VectorStore, type VectorChunk, type SearchResult } from './vectorStore.js';
 export { eventBus, type WebSocketMessage, type TaskStatusEvent, type StepLoggedEvent, type ResourceAlertEvent } from './eventBus.js';
 export { logger, type LogLevel, type LogEntry } from './logger.js';
+export { permissionRequestService, PermissionRequestService, type PermissionRequest } from './permissionRequestService.js';
 
 import { db, schema } from '../db/index.js';
 
@@ -27,12 +28,15 @@ export async function initializeDatabase(): Promise<void> {
     'agents', 'models', 'prompts', 'skills', 'agentSkills',
     'agentCapabilities', 'agentToolPermissions', 'tasks', 'taskLogs',
     'knowledgeFiles', 'sessionMemory', 'longTermMemory', 'auditLogs',
-    'scheduledJobs', 'jobExecutionLogs'
+    'scheduledJobs', 'jobExecutionLogs', 'permissionRequests'
   ];
 
   for (const table of tables) {
+    if (table === 'models') continue;
+    const tableSchema = schema[table as keyof typeof schema];
+    if (!tableSchema) continue;
     try {
-      await db.select().from(schema[table as keyof typeof schema]).limit(0);
+      await db.select().from(tableSchema).limit(0);
     } catch {
       console.log(`Table ${table} does not exist, skipping...`);
     }

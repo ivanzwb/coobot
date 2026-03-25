@@ -182,6 +182,23 @@ export class VectorStore {
   }
 
   private async embedText(text: string): Promise<number[]> {
+    try {
+      const embeddingModel = await this.getEmbeddingModel();
+      if (embeddingModel) {
+        const response = await embeddingModel.embeddings.create({
+          model: 'text-embedding-3-small',
+          input: text,
+        });
+        return response.data[0].embedding;
+      }
+    } catch (error) {
+      console.error('Failed to get embedding from API, using fallback:', error);
+    }
+    
+    return this.simpleEmbedding(text);
+  }
+
+  private simpleEmbedding(text: string): number[] {
     const simpleHash = (str: string): number[] => {
       let hash = 0;
       const chars: number[] = [];
@@ -201,6 +218,35 @@ export class VectorStore {
       result.push(...extra);
     }
     return result.slice(0, 384);
+  }
+
+  private embeddingModelCache: any = null;
+
+  private async getEmbeddingModel(): Promise<any> {
+    if (this.embeddingModelCache) {
+      return this.embeddingModelCache;
+    }
+
+    try {
+      const openaiApiKey = process.env.OPENAI_API_KEY;
+      const openaiBaseUrl = process.env.OPENAI_BASE_URL;
+      
+      if (!openaiApiKey) {
+        console.warn('OPENAI_API_KEY not set, using fallback embedding');
+        return null;
+      }
+
+      const { default: OpenAI } = await import('openai');
+      this.embeddingModelCache = new OpenAI({
+        apiKey: openaiApiKey,
+        baseURL: openaiBaseUrl || undefined,
+      });
+      return this.embeddingModelCache;
+    } catch (error) {
+      console.error('Failed to get embedding model:', error);
+    }
+
+    return null;
   }
 }
 

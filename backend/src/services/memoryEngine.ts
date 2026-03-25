@@ -117,6 +117,19 @@ export class MemoryEngine {
     return id;
   }
 
+  async addFact(agentId: string, category: string, value: string, metadata?: Record<string, unknown>): Promise<string> {
+    const key = `${category}_${Date.now()}`;
+    const id = await this.saveToLtm({
+      agentId,
+      category: category as MemoryCategory,
+      key,
+      value,
+      sourceType: 'task_completion',
+      confidence: 0.7,
+    });
+    return id;
+  }
+
   async searchLtm(params: { query: string; agentId: string; topK?: number }): Promise<LtmQueryResult[]> {
     const topK = params.topK || 3;
     const results = await db.select()
@@ -164,6 +177,67 @@ export class MemoryEngine {
         })
         .where(eq(schema.longTermMemory.id, id));
     }
+  }
+
+  async extractFactsFromConversation(userMessage: string, agentId: string): Promise<string[]> {
+    const extractedFacts: string[] = [];
+    
+    const preferencePatterns = [
+      /(?:I prefer|I always use|I like to use|I want to use|默认用|喜欢用|偏好)(.+?)(?:\.|，|$)/gi,
+      /(?:不要|别|禁止|不要使用|不要用)(.+?)(?:\.|，|$)/gi,
+    ];
+
+    for (const pattern of preferencePatterns) {
+      const matches = [...userMessage.matchAll(pattern)];
+      for (const match of matches) {
+        if (match[1]) {
+          const fact = match[1].trim();
+          extractedFacts.push(fact);
+          await this.addFact(agentId, 'preference', fact);
+        }
+      }
+    }
+
+    const projectPatterns = [
+      /(?:project|项目)(?:\s*:|\s+is|\s+名称)(?:\s*:|\s+)?(.+?)(?:\.|，|$)/gi,
+    ];
+
+    for (const pattern of projectPatterns) {
+      const matches = [...userMessage.matchAll(pattern)];
+      for (const match of matches) {
+        if (match[1]) {
+          const fact = `Project: ${match[1].trim()}`;
+          extractedFacts.push(fact);
+          await this.addFact(agentId, 'fact', fact);
+        }
+      }
+    }
+
+    return extractedFacts;
+  }
+
+  async getMemoryContext(agentId: string, query: string): Promise<{
+    stmContext: string;
+    ltmContext: string;
+  }> {
+    const stmHistory = await this.getActiveHistory(10);
+    const stmContext = stmHistory
+      .map(h => `${h.role}: ${h.content}`)
+      .join('\n');
+
+    const ltmResults = await this.searchLtm({
+      query,
+      agentId,
+      topK: 3,
+    });
+    const ltmContext = ltmResults
+      .map(r => `[${r.type}] ${r.content}`)
+      .join('\n');
+
+    return {
+      stmContext: stmContext.substring(0, 2000),
+      ltmContext: ltmContext.substring(0, 1000),
+    };
   }
 }
 
