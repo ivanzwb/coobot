@@ -158,15 +158,14 @@ const SettingsView: React.FC = () => {
   };
 
   const handleEditModel = (model: Model) => {
-    const config = model.configJson ? JSON.parse(model.configJson) : {};
     setEditingModel(model);
     setModelForm({
       name: model.name,
       provider: model.provider,
       modelName: model.modelName,
       type: model.type,
-      apiKey: config.apiKey || '',
-      baseUrl: config.baseUrl || '',
+      apiKey: model.apiKey || '',
+      baseUrl: model.baseUrl || '',
       contextWindow: model.contextWindow || 4096,
     });
     setShowModelForm(true);

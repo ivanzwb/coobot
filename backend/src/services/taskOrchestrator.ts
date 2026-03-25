@@ -6,16 +6,20 @@ import type { Task } from '../db';
 import { agentCapabilityRegistry } from './agentCapabilityRegistry';
 import { EventEmitter } from 'events';
 import { eventBus } from './eventBus.js';
+import { leaderAgent } from './leaderAgent.js';
+import { logger } from './logger.js';
 
 export class TaskOrchestrator extends EventEmitter {
   private taskQueue: Map<string, Task> = new Map();
   private agentQueues: Map<string, string[]> = new Map();
   private heartbeatInterval: NodeJS.Timeout;
+  private leaderProcessingInterval: NodeJS.Timeout;
   private timeoutThreshold: number = 10 * 60 * 1000;
 
   constructor() {
     super();
     this.heartbeatInterval = setInterval(() => this.handleTimeout(), 30000);
+    this.leaderProcessingInterval = setInterval(() => this.processLeaderTasks(), 2000);
     this.loadQueuesFromDB();
   }
 
@@ -48,6 +52,8 @@ export class TaskOrchestrator extends EventEmitter {
   }
 
   async createTask(input: TaskInput, triggerMode: 'immediate' | 'scheduled' | 'event_triggered' = 'immediate'): Promise<Task> {
+    logger.info('TaskOrchestrator', 'Creating task', { triggerMode, input });
+    
     const taskId = uuidv4();
     const rootTaskId = taskId;
     
@@ -85,6 +91,7 @@ export class TaskOrchestrator extends EventEmitter {
 
     this.taskQueue.set(taskId, task);
     this.emit('task_created', task);
+    logger.info('TaskOrchestrator', 'Task created', { taskId, status: task.status });
 
     return task;
   }
@@ -299,6 +306,41 @@ export class TaskOrchestrator extends EventEmitter {
     return this.taskQueue.get(taskId) || (await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)))[0];
   }
 
+  private async processLeaderTasks(): Promise<void> {
+    try {
+      logger.info('TaskOrchestrator', 'Checking for leader tasks');
+      
+      const leaderTasks = await db.select()
+        .from(schema.tasks)
+        .where(eq(schema.tasks.status, 'WAITING_FOR_LEADER'));
+
+      logger.info('TaskOrchestrator', 'Found leader tasks', { count: leaderTasks.length });
+
+      if (leaderTasks.length === 0) return;
+
+      for (const task of leaderTasks) {
+        if (task.status !== 'WAITING_FOR_LEADER') continue;
+        
+        logger.info('TaskOrchestrator', 'Processing task', { taskId: task.id, status: task.status });
+        
+        const runningTasks = await db.select()
+          .from(schema.tasks)
+          .where(eq(schema.tasks.status, 'PARSING'));
+        
+        if (runningTasks.length > 0) {
+          logger.info('TaskOrchestrator', 'Task already in progress, skipping', { runningTaskId: runningTasks[0].id });
+          break;
+        }
+        
+        await this.updateTaskStatus(task.id, 'PARSING');
+        await leaderAgent.processTask(task as Task);
+        break;
+      }
+    } catch (error) {
+      logger.error('TaskOrchestrator', 'Error processing leader tasks', error);
+    }
+  }
+
   async getTaskTree(rootTaskId: string): Promise<{ root: Task; children: Task[] }> {
     const root = await this.getTask(rootTaskId);
     if (!root) return { root: null as unknown as Task, children: [] };
@@ -312,6 +354,9 @@ export class TaskOrchestrator extends EventEmitter {
   destroy(): void {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
+    }
+    if (this.leaderProcessingInterval) {
+      clearInterval(this.leaderProcessingInterval);
     }
   }
 }

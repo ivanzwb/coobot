@@ -1,10 +1,23 @@
 import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
 
+export const modelConfigs = sqliteTable('model_configs', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  provider: text('provider').notNull(),
+  modelName: text('model_name').notNull(),
+  baseUrl: text('base_url'),
+  apiKey: text('api_key'),
+  contextWindow: integer('context_window'),
+  status: text('status').default('offline'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).default(new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).default(new Date()),
+});
+
 export const agents = sqliteTable('agents', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
   type: text('type').notNull(),
-  modelConfigJson: text('model_config_json').notNull(),
+  modelConfigId: text('model_config_id').references(() => modelConfigs.id),
   promptTemplateId: text('prompt_template_id'),
   status: text('status').default('IDLE'),
   createdAt: integer('created_at', { mode: 'timestamp' }).default(new Date()),
@@ -174,16 +187,4 @@ export const jobExecutionLogs = sqliteTable('job_execution_logs', {
   createdAt: integer('created_at', { mode: 'timestamp' }).default(new Date()),
 });
 
-export const models = sqliteTable('models', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  type: text('type').notNull(),
-  provider: text('provider').notNull(),
-  modelName: text('model_name').notNull(),
-  configJson: text('config_json').notNull(),
-  capabilitiesJson: text('capabilities_json'),
-  status: text('status').default('offline'),
-  contextWindow: integer('context_window'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).default(new Date()),
-  updatedAt: integer('updated_at', { mode: 'timestamp' }).default(new Date()),
-});
+export const models = null;

@@ -6,11 +6,24 @@ const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'data/biosbot.db'
 const db = new Database(dbPath);
 
 const schema = `
+CREATE TABLE IF NOT EXISTS model_configs (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model_name TEXT NOT NULL,
+  base_url TEXT,
+  api_key TEXT,
+  context_window INTEGER DEFAULT 4096,
+  status TEXT DEFAULT 'offline',
+  created_at INTEGER,
+  updated_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   type TEXT NOT NULL,
-  model_config_json TEXT NOT NULL,
+  model_config_id TEXT REFERENCES model_configs(id),
   prompt_template_id TEXT,
   status TEXT DEFAULT 'IDLE',
   created_at INTEGER,
@@ -182,16 +195,15 @@ CREATE TABLE IF NOT EXISTS job_execution_logs (
   created_at INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS models (
+CREATE TABLE IF NOT EXISTS model_configs (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  type TEXT NOT NULL,
   provider TEXT NOT NULL,
   model_name TEXT NOT NULL,
-  config_json TEXT NOT NULL,
-  capabilities_json TEXT,
+  base_url TEXT,
+  api_key TEXT,
+  context_window INTEGER DEFAULT 4096,
   status TEXT DEFAULT 'offline',
-  context_window INTEGER,
   created_at INTEGER,
   updated_at INTEGER
 );

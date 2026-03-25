@@ -39,13 +39,13 @@ export async function initializeDatabase(): Promise<void> {
   }
 
   const existingLeader = await db.select().from(schema.agents).where(eq(schema.agents.type, 'LEADER'));
-  
+
   if (existingLeader.length === 0) {
     await db.insert(schema.agents).values({
       id: 'LEADER',
       name: 'Leader Agent',
       type: 'LEADER',
-      modelConfigJson: JSON.stringify({ provider: 'ollama', model: 'llama2' }),
+      modelConfigId: null,
       status: 'IDLE',
       createdAt: new Date(),
       updatedAt: new Date(),

@@ -35,7 +35,8 @@ export interface Agent {
   id: string;
   name: string;
   type: 'LEADER' | 'DOMAIN';
-  modelConfigJson: string;
+  modelConfigId: string | null;
+  modelConfig: ModelConfig | null;
   promptTemplateId: string | null;
   status: AgentStatus;
   createdAt: string;
@@ -48,15 +49,19 @@ export interface Agent {
   skills?: string[];
 }
 
-export interface Model {
+export interface ModelConfig {
   id: string;
   name: string;
-  type: 'local' | 'api';
   provider: string;
   modelName: string;
+  baseUrl: string | null;
+  apiKey: string | null;
+  contextWindow: number | null;
   status: 'ready' | 'loading' | 'error' | 'offline';
-  contextWindow: number;
-  configJson?: string;
+}
+
+export interface Model extends ModelConfig {
+  type: 'local' | 'api';
 }
 
 export interface KnowledgeFile {

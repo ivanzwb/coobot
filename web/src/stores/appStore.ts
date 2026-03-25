@@ -85,7 +85,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   createTask: async (content: string) => {
     try {
-      const response = await tasksApi.create({ content, triggerMode: 'immediate' });
+      const response = await tasksApi.create({ content });
       const task = response.data;
       set(state => ({ tasks: [task, ...state.tasks] }));
       return task;

@@ -27,13 +27,16 @@ router.get('/', async (_req: Request, res: Response) => {
   try {
     const agents = await db.select().from(schema.agents);
     const capabilities = await db.select().from(schema.agentCapabilities);
+    const modelConfigs = await db.select().from(schema.modelConfigs);
     
     const capMap = new Map(capabilities.map(c => [c.agentId, c]));
+    const configMap = new Map(modelConfigs.map(c => [c.id, c]));
     
     const result = agents.map(agent => {
       const cap = capMap.get(agent.id);
       return {
         ...agent,
+        modelConfig: agent.modelConfigId ? configMap.get(agent.modelConfigId) : null,
         capabilities: cap ? {
           skills: JSON.parse(cap.skillsJson || '[]'),
           tools: JSON.parse(cap.toolsJson || '[]'),
@@ -58,6 +61,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Agent not found' });
     }
 
+    const agent = agents[0];
     const capabilities = await db.select()
       .from(schema.agentCapabilities)
       .where(eq(schema.agentCapabilities.agentId, req.params.id));
@@ -66,8 +70,19 @@ router.get('/:id', async (req: Request, res: Response) => {
       .from(schema.agentSkills)
       .where(eq(schema.agentSkills.agentId, req.params.id));
 
+    let modelConfig = null;
+    if (agent.modelConfigId) {
+      const configs = await db.select()
+        .from(schema.modelConfigs)
+        .where(eq(schema.modelConfigs.id, agent.modelConfigId));
+      if (configs.length > 0) {
+        modelConfig = configs[0];
+      }
+    }
+
     res.json({
-      ...agents[0],
+      ...agent,
+      modelConfig,
       capabilities: capabilities[0] ? {
         skills: JSON.parse(capabilities[0].skillsJson || '[]'),
         tools: JSON.parse(capabilities[0].toolsJson || '[]'),
@@ -82,7 +97,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { name, type, modelConfig, promptTemplateId, skills } = req.body;
+    const { name, type, modelConfigId, promptTemplateId, skills } = req.body;
     
     const id = uuidv4();
     
@@ -90,7 +105,7 @@ router.post('/', async (req: Request, res: Response) => {
       id,
       name,
       type: type || 'DOMAIN',
-      modelConfigJson: JSON.stringify(modelConfig || {}),
+      modelConfigId: modelConfigId || null,
       promptTemplateId: promptTemplateId || null,
       status: 'IDLE',
       createdAt: new Date(),
@@ -110,7 +125,9 @@ router.post('/', async (req: Request, res: Response) => {
       .from(schema.agents)
       .where(eq(schema.agents.id, id));
 
-    res.status(201).json(agent[0]);
+    const agentWithConfig = await enhanceAgentWithConfig(agent[0]);
+
+    res.status(201).json(agentWithConfig);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -118,12 +135,12 @@ router.post('/', async (req: Request, res: Response) => {
 
 router.put('/:id', async (req: Request, res: Response) => {
   try {
-    const { name, modelConfig, promptTemplateId } = req.body;
+    const { name, modelConfigId, promptTemplateId } = req.body;
 
     await db.update(schema.agents)
       .set({
         name: name,
-        modelConfigJson: JSON.stringify(modelConfig || {}),
+        modelConfigId: modelConfigId,
         promptTemplateId: promptTemplateId,
         updatedAt: new Date(),
       })
@@ -133,7 +150,9 @@ router.put('/:id', async (req: Request, res: Response) => {
       .from(schema.agents)
       .where(eq(schema.agents.id, req.params.id));
 
-    res.json(agent[0]);
+    const agentWithConfig = await enhanceAgentWithConfig(agent[0]);
+
+    res.json(agentWithConfig);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -184,5 +203,18 @@ router.delete('/:id/skills/:skillId', async (req: Request, res: Response) => {
     res.status(500).json({ error: String(error) });
   }
 });
+
+async function enhanceAgentWithConfig(agent: any) {
+  let modelConfig = null;
+  if (agent.modelConfigId) {
+    const configs = await db.select()
+      .from(schema.modelConfigs)
+      .where(eq(schema.modelConfigs.id, agent.modelConfigId));
+    if (configs.length > 0) {
+      modelConfig = configs[0];
+    }
+  }
+  return { ...agent, modelConfig };
+}
 
 export default router;

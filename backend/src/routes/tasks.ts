@@ -7,11 +7,11 @@ const router = Router();
 
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { content, attachments, triggerMode } = req.body;
+    const { content, attachments } = req.body;
     
     const task = await taskOrchestrator.createTask(
       { content, attachments },
-      triggerMode || 'immediate'
+      'immediate'
     );
 
     res.status(201).json(task);

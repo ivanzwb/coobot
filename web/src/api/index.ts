@@ -9,7 +9,7 @@ export const tasksApi = {
   getAll: () => api.get<Task[]>('/tasks'),
   getById: (id: string) => api.get<Task>(`/tasks/${id}`),
   getTree: (id: string) => api.get(`/tasks/${id}/tree`),
-  create: (data: { content: string; attachments?: unknown[]; triggerMode?: string }) =>
+  create: (data: { content: string; attachments?: unknown[] }) => 
     api.post<Task>('/tasks', data),
   terminate: (id: string) => api.post(`/tasks/${id}/terminate`),
   clarify: (id: string) => api.post(`/tasks/${id}/clarify`),

@@ -17,6 +17,6 @@ export type KnowledgeFile = typeof schema.knowledgeFiles.$inferSelect;
 export type SessionMessage = typeof schema.sessionMemory.$inferSelect;
 export type LongTermMemory = typeof schema.longTermMemory.$inferSelect;
 export type ScheduledJob = typeof schema.scheduledJobs.$inferSelect;
-export type Model = typeof schema.models.$inferSelect;
+export type ModelConfig = typeof schema.modelConfigs.$inferSelect;
 
 export { schema };

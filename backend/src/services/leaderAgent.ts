@@ -8,6 +8,8 @@ import { taskOrchestrator } from './taskOrchestrator';
 import { agentRuntime } from './agentRuntime';
 import { memoryEngine } from './memoryEngine';
 import { eventBus } from './eventBus.js';
+import { logger } from './logger.js';
+import OpenAI from 'openai';
 
 const CONFIDENCE_THRESHOLD = 0.7;
 
@@ -15,6 +17,8 @@ export class LeaderAgent extends EventEmitter {
   private leaderAgentId: string = 'LEADER';
 
   async processTask(task: Task): Promise<void> {
+    logger.info('LeaderAgent', 'Processing task', { taskId: task.id });
+    
     try {
       await taskOrchestrator.updateTaskStatus(task.id, 'PARSING');
       
@@ -132,6 +136,8 @@ Return only valid JSON, no other text.
   }
 
   private async callLeaderModel(prompt: string): Promise<string> {
+    logger.info('LeaderAgent', 'Calling leader model', { promptLength: prompt.length });
+    
     try {
       const leaderAgent = await db.select()
         .from(schema.agents)
@@ -141,26 +147,42 @@ Return only valid JSON, no other text.
         throw new Error('Leader agent not found');
       }
 
-      const modelConfig = JSON.parse(leaderAgent[0].modelConfigJson);
-
-      const response = await fetch('http://localhost:11434/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: modelConfig.model || 'llama2',
-          prompt: prompt,
-          stream: false,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Model API error: ${response.statusText}`);
+      const modelConfigId = leaderAgent[0].modelConfigId;
+      if (!modelConfigId) {
+        throw new Error('Leader agent has no model config');
       }
 
-      const data = await response.json() as { response?: string };
-      return data.response || '{"confidenceScore": 0.8, "intentType": "general", "refinedGoal": ""}';
+      const modelConfigs = await db.select()
+        .from(schema.modelConfigs)
+        .where(eq(schema.modelConfigs.id, modelConfigId));
+
+      if (modelConfigs.length === 0) {
+        throw new Error('Model config not found');
+      }
+
+      const modelConfig = modelHub.buildModelConfig(modelConfigs[0]);
+      logger.info('LeaderAgent', 'Model config loaded', { provider: modelConfig.provider, model: modelConfig.modelName });
+
+      logger.info('LeaderAgent', 'Creating OpenAI client', { baseUrl: modelConfig.baseUrl });
+      
+      const client = new OpenAI({
+        apiKey: modelConfig.apiKey || '',
+        baseURL: modelConfig.baseUrl || undefined,
+        timeout: 60000,
+      });
+
+      logger.info('LeaderAgent', 'Calling OpenAI API');
+      const response = await client.chat.completions.create({
+        model: modelConfig.modelName,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.3,
+      });
+
+      const result = response.choices[0]?.message?.content || '{"confidenceScore": 0.8, "intentType": "general", "refinedGoal": ""}';
+      logger.info('LeaderAgent', 'OpenAI response received', { resultLength: result.length });
+      return result;
     } catch (error) {
-      console.error('Leader model call failed:', error);
+      logger.error('LeaderAgent', 'Model call failed', error);
       return '{"confidenceScore": 0.8, "intentType": "general", "refinedGoal": ""}';
     }
   }
