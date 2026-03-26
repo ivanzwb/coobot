@@ -82,9 +82,6 @@ export class SecuritySandbox {
 
   validateToolParams(tool: string, args: Record<string, unknown>): boolean {
     switch (tool) {
-      case 'read_file':
-      case 'write_file':
-        return typeof args.path === 'string' && args.path.length > 0;
       case 'exec_shell':
         const dangerousChars = ['|', '&', ';', '`', '$', '(', ')', '{', '}', '\n', '\r'];
         return !dangerousChars.some(char => String(args.command).includes(char));

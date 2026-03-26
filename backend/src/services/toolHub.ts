@@ -6,10 +6,10 @@ import { configManager } from './configManager';
 import { createReadStream } from 'fs';
 
 export interface ToolDescriptor {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-}
+  name: string,
+  textSchema: string;
+  jsonSchema: Record<string, unknown>;
+};
 
 export interface ToolResult {
   success: boolean;
@@ -35,7 +35,7 @@ abstract class BaseTool {
     };
   }
 
-  toTextDescription(): string {
+  toTextSchema(): string {
     const parametersText = Object.entries((this.parameters.properties as Record<string, any>) || {})
       .map(([key, prop]) => `
     - ${key} (${(prop as any).type}, ${(this.parameters.required as string[]).includes(key) ? 'Required' : 'Optional'}): ${(prop as any).description}}`)
@@ -437,8 +437,8 @@ export class ToolHub {
   listTools(): ToolDescriptor[] {
     return Array.from(this.tools.values()).map(t => ({
       name: t.name,
-      description: t.description,
-      parameters: t.parameters,
+      textSchema: t.toTextSchema(),
+      jsonSchema: t.toJsonSchema()
     }));
   }
 

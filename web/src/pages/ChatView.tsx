@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '../stores/appStore';
-import { tasksApi } from '../api';
+import { tasksApi, chatApi, type ChatMessage } from '../api';
 import { useWebSocket, useTaskEvents } from '../hooks/useWebSocket';
 
 const ChatView: React.FC = () => {
@@ -9,10 +9,20 @@ const ChatView: React.FC = () => {
   const [clarificationTask, setClarificationTask] = useState<any>(null);
   const [clarificationQuestions, setClarificationQuestions] = useState<string[]>([]);
   const [clarificationAnswer, setClarificationAnswer] = useState('');
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { createTask, tasks, fetchTasks } = useAppStore();
   useWebSocket();
   const { lastMessage } = useTaskEvents();
+
+  const fetchChatHistory = async () => {
+    try {
+      const response = await chatApi.getHistory(50, 0);
+      setChatHistory(response.data.filter(m => m.role === 'user' && !m.isArchived));
+    } catch (error) {
+      console.error('Failed to fetch chat history:', error);
+    }
+  };
 
   useEffect(() => {
     if (!lastMessage) return;
@@ -22,12 +32,16 @@ const ChatView: React.FC = () => {
     if (type === 'clarification_needed') {
       setClarificationQuestions(data.questions || []);
       fetchTasks();
+      fetchChatHistory();
     } else if (type === 'task_status_changed') {
       fetchTasks();
+      fetchChatHistory();
     } else if (type === 'task_completed') {
       fetchTasks();
+      fetchChatHistory();
     } else if (type === 'task_failed') {
       fetchTasks();
+      fetchChatHistory();
     }
   }, [lastMessage, fetchTasks]);
 
@@ -40,15 +54,12 @@ const ChatView: React.FC = () => {
 
   useEffect(() => {
     fetchTasks();
+    fetchChatHistory();
   }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [tasks]);
-
-  const sortedTasks = [...tasks].sort((a, b) =>
-    new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-  );
+  }, [tasks, chatHistory]);
 
   const formatTime = (dateStr: string) => {
     const date = new Date(dateStr);
@@ -60,13 +71,20 @@ const ChatView: React.FC = () => {
     });
   };
 
+  const getTaskById = (taskId: string | null) => {
+    if (!taskId) return null;
+    return tasks.find(t => t.id === taskId) || null;
+  };
+
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
 
     setIsLoading(true);
     try {
-      await createTask(input);
+      await chatApi.send({ content: input });
       setInput('');
+      fetchChatHistory();
+      fetchTasks();
     } catch (error) {
       console.error('Failed to send message:', error);
     } finally {
@@ -142,90 +160,97 @@ const ChatView: React.FC = () => {
       </header>
 
       <div className="chat-messages">
-        {tasks.length === 0 ? (
+        {chatHistory.length === 0 && tasks.length === 0 ? (
           <div style={{ textAlign: 'center', color: '#999', marginTop: 40 }}>
             <p>开始一个新对话吧</p>
           </div>
         ) : (
-          sortedTasks.map(task => (
-            <div key={task.id} className="message">
-              <div className="message-content">
-                <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>
-                  {formatTime(task.createdAt)}
+          chatHistory.map(chatMsg => {
+            const task = getTaskById(chatMsg.taskId);
+            return (
+              <div key={chatMsg.id} className="message">
+                <div className="message-content">
+                  <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>
+                    {formatTime(chatMsg.timestamp)}
+                  </div>
+                  <div style={{ marginBottom: 8, fontWeight: 500 }}>
+                    {chatMsg.content}
+                  </div>
+                  {task && (
+                    <>
+                      <div style={{
+                        fontSize: 12,
+                        color: task.status === 'COMPLETED' ? '#52c41a' :
+                               task.status === 'EXCEPTION' ? '#ff4d4f' : '#999',
+                        marginBottom: 8
+                      }}>
+                        {getStatusText(task.status)}
+                      </div>
+
+                      {task.status === 'RUNNING' && (
+                        <div style={{
+                          background: '#f5f5f5',
+                          padding: 12,
+                          borderRadius: 4,
+                          marginTop: 8
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                            <span style={{ fontSize: 16 }}>🤔</span>
+                            <span style={{ fontWeight: 500 }}>正在执行...</span>
+                          </div>
+                          <div style={{ fontSize: 12, color: '#666' }}>
+                            Agent 正在处理您的请求
+                          </div>
+                        </div>
+                      )}
+
+                      {(task.status === 'PARSING' || task.status === 'DISPATCHING') && (
+                        <div style={{
+                          background: '#e6f7ff',
+                          padding: 12,
+                          borderRadius: 4,
+                          marginTop: 8
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontSize: 16 }}>📋</span>
+                            <span>
+                              {task.status === 'PARSING' ? '正在分析意图...' : '正在分发任务...'}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {task.outputSummary && (
+                        <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #eee' }}>
+                          <div style={{ marginBottom: 4, fontWeight: 500 }}>💡 结果:</div>
+                          <div style={{ whiteSpace: 'pre-wrap' }}>{task.outputSummary}</div>
+                        </div>
+                      )}
+
+                      {task.errorMsg && (
+                        <div style={{
+                          marginTop: 8,
+                          padding: 8,
+                          background: '#fff2f0',
+                          borderRadius: 4,
+                          color: '#ff4d4f'
+                        }}>
+                          <div>❌ 错误: {task.errorMsg}</div>
+                          <button
+                            className="btn btn-sm"
+                            style={{ marginTop: 8 }}
+                            onClick={() => handleRetry(task.id)}
+                          >
+                            重试
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
-                <div style={{ marginBottom: 8, fontWeight: 500 }}>
-                  { JSON.parse(task.inputPayload).description }
-                </div>
-                <div style={{
-                  fontSize: 12,
-                  color: task.status === 'COMPLETED' ? '#52c41a' :
-                         task.status === 'EXCEPTION' ? '#ff4d4f' : '#999',
-                  marginBottom: 8
-                }}>
-                  {getStatusText(task.status)}
-                </div>
-
-                {task.status === 'RUNNING' && (
-                  <div style={{
-                    background: '#f5f5f5',
-                    padding: 12,
-                    borderRadius: 4,
-                    marginTop: 8
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                      <span style={{ fontSize: 16 }}>🤔</span>
-                      <span style={{ fontWeight: 500 }}>正在执行...</span>
-                    </div>
-                    <div style={{ fontSize: 12, color: '#666' }}>
-                      Agent 正在处理您的请求
-                    </div>
-                  </div>
-                )}
-
-                {(task.status === 'PARSING' || task.status === 'DISPATCHING') && (
-                  <div style={{
-                    background: '#e6f7ff',
-                    padding: 12,
-                    borderRadius: 4,
-                    marginTop: 8
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span style={{ fontSize: 16 }}>📋</span>
-                      <span>
-                        {task.status === 'PARSING' ? '正在分析意图...' : '正在分发任务...'}
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {task.outputSummary && (
-                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #eee' }}>
-                    <div style={{ marginBottom: 4, fontWeight: 500 }}>💡 结果:</div>
-                    <div style={{ whiteSpace: 'pre-wrap' }}>{task.outputSummary}</div>
-                  </div>
-                )}
-
-                {task.errorMsg && (
-                  <div style={{
-                    marginTop: 8,
-                    padding: 8,
-                    background: '#fff2f0',
-                    borderRadius: 4,
-                    color: '#ff4d4f'
-                  }}>
-                    <div>❌ 错误: {task.errorMsg}</div>
-                    <button
-                      className="btn btn-sm"
-                      style={{ marginTop: 8 }}
-                      onClick={() => handleRetry(task.id)}
-                    >
-                      重试
-                    </button>
-                  </div>
-                )}
               </div>
-            </div>
-          ))
+            );
+          })
         )}
         <div ref={messagesEndRef} />
       </div>

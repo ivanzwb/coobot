@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { agentCapabilityRegistry } from '../services/index.js';
+import { agentCapabilityRegistry, toolHub } from '../services/index.js';
 
 const router = Router();
 
@@ -117,9 +117,30 @@ router.post('/', async (req: Request, res: Response) => {
       name,
       status: 'ONLINE',
       skills: skills || [],
-      tools: [],
+      tools: toolHub.listTools().map(t => t.name),
       description: '',
     });
+
+    const defaultTools = toolHub.listTools().map(t => t.name);
+    const defaultToolPolicies: Record<string, string> = {
+      read_file: 'ASK',
+      edit_file: 'ASK',
+      write_file: 'ASK',
+      list_directory: 'ALLOW',
+      exec_shell: 'DENY',
+      http_request: 'ASK',
+      system_info: 'ALLOW',
+    };
+
+    for (const toolName of defaultTools) {
+      const policy = defaultToolPolicies[toolName] || 'DENY';
+      await db.insert(schema.agentToolPermissions).values({
+        agentId: id,
+        toolName,
+        policy,
+        updatedAt: new Date(),
+      }).onConflictDoNothing();
+    }
 
     const agent = await db.select()
       .from(schema.agents)
@@ -173,6 +194,9 @@ router.put('/:id', async (req: Request, res: Response) => {
 
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
+    await db.delete(schema.agentToolPermissions)
+      .where(eq(schema.agentToolPermissions.agentId, req.params.id));
+
     await db.delete(schema.agentCapabilities)
       .where(eq(schema.agentCapabilities.agentId, req.params.id));
 

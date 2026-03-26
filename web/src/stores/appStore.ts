@@ -85,9 +85,10 @@ export const useAppStore = create<AppState>((set) => ({
 
   createTask: async (content: string) => {
     try {
+      console.log('[createTask] Creating task:', content);
       const response = await tasksApi.create({ content });
       const task = response.data;
-      set(state => ({ tasks: [task, ...state.tasks] }));
+      console.log('[createTask] Task created:', task.id);
       return task;
     } catch (error) {
       console.error('Failed to create task:', error);

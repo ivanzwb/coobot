@@ -3,9 +3,14 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { configManager } from '../services/configManager';
 import * as schema from './schema';
 import path from 'path';
+import fs from 'fs';
 
 const workspacePath = configManager.getWorkspacePath();
-const sqlitePath = path.join(workspacePath, 'database', 'biosbot.db');
+const databaseDir = path.join(workspacePath, 'database');
+if (!fs.existsSync(databaseDir)) {
+  fs.mkdirSync(databaseDir, { recursive: true });
+}
+const sqlitePath = path.join(databaseDir, 'biosbot.db');
 const sqlite = new Database(sqlitePath);
 sqlite.pragma('journal_mode = WAL');
 

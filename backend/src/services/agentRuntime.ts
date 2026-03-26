@@ -146,9 +146,10 @@ export class AgentRuntime extends EventEmitter {
       }
     }
 
+    logger.debug('AgentRuntime', `${agentConfig.id}:${agentConfig.name}, tools: ${agentConfig.tools}, skills: ${agentConfig.skills}`)
     const toolsText = agentConfig.tools.length > 0
       ? `\n可用工具：\n${agentConfig.tools.map(t => `- ${t}`).join('\n')}`
-      : '\n可用工具：无';
+      : '';
 
     const skillsText = agentConfig.skills.length > 0
       ? `\n技能：${agentConfig.skills.join(', ')}`
@@ -156,7 +157,7 @@ export class AgentRuntime extends EventEmitter {
 
     if (basePrompt.includes('${tools}')) {
       basePrompt = basePrompt.replace('${tools}', toolsText);
-    } else {
+    } else if (toolsText) {
       basePrompt += toolsText;
     }
 

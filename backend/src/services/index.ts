@@ -22,6 +22,8 @@ export { logger, type LogLevel, type LogEntry } from './logger.js';
 export { permissionRequestService, PermissionRequestService, type PermissionRequest } from './permissionRequestService.js';
 
 import { db, schema } from '../db/index.js';
+import { eq } from 'drizzle-orm';
+import { toolHub } from './toolHub.js';
 
 export async function initializeDatabase(): Promise<void> {
   const tables = [
@@ -54,6 +56,42 @@ export async function initializeDatabase(): Promise<void> {
       updatedAt: new Date(),
     });
   }
-}
 
-import { eq } from 'drizzle-orm';
+  const existingCap = await db.select().from(schema.agentCapabilities)
+    .where(eq(schema.agentCapabilities.agentId, 'LEADER'));
+
+  if (existingCap.length === 0) {
+    const defaultTools = toolHub.listTools().map(t => t.name);
+    
+    await db.insert(schema.agentCapabilities).values({
+      agentId: 'LEADER',
+      skillsJson: JSON.stringify([]),
+      toolsJson: JSON.stringify(defaultTools),
+      description: 'Leader Agent 默认能力',
+      constraints: '',
+      status: 'ONLINE',
+      lastHeartbeat: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const defaultToolPolicies: Record<string, string> = {
+      read_file: 'ASK',
+      edit_file: 'ASK',
+      write_file: 'ASK',
+      list_directory: 'ALLOW',
+      exec_shell: 'DENY',
+      http_request: 'ASK',
+      system_info: 'ALLOW',
+    };
+
+    for (const toolName of defaultTools) {
+      const policy = defaultToolPolicies[toolName] || 'DENY';
+      await db.insert(schema.agentToolPermissions).values({
+        agentId: 'LEADER',
+        toolName,
+        policy,
+        updatedAt: new Date(),
+      }).onConflictDoNothing();
+    }
+  }
+}

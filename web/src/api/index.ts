@@ -5,6 +5,23 @@ const api = axios.create({
   baseURL: '/api/v1',
 });
 
+export interface ChatMessage {
+  id: number;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  attachments: unknown[];
+  taskId: string | null;
+  timestamp: string;
+  isArchived: boolean;
+}
+
+export const chatApi = {
+  send: (data: { content: string; attachments?: unknown[] }) =>
+    api.post('/chat', data),
+  getHistory: (limit?: number, offset?: number) =>
+    api.get<ChatMessage[]>('/chat', { params: { limit, offset } }),
+};
+
 export const tasksApi = {
   getAll: () => api.get<Task[]>('/tasks'),
   getById: (id: string) => api.get<Task>(`/tasks/${id}`),
