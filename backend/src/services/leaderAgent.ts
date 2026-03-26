@@ -1,4 +1,6 @@
 import { EventEmitter } from 'events';
+import * as fs from 'fs';
+import * as path from 'path';
 import { db, schema } from '../db';
 import { eq } from 'drizzle-orm';
 import type { DomainAgentProfile, DAGNode, IntentResult, ValidationReport, UnassignableIssue, AgentConfig } from '../types';
@@ -12,7 +14,30 @@ import { logger } from './logger.js';
 import { modelHub } from './modelHub.js';
 import OpenAI from 'openai';
 
-const CONFIDENCE_THRESHOLD = 0.7;
+const PROMPTS_DIR = path.join(process.cwd(), 'src/config/prompts');
+const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
+
+function loadPromptTemplate(filename: string, variables: Record<string, string>): string {
+  const filePath = path.join(PROMPTS_DIR, filename);
+  try {
+    if (fs.existsSync(filePath)) {
+      let template = fs.readFileSync(filePath, 'utf-8');
+      for (const [key, value] of Object.entries(variables)) {
+        template = template.replace(new RegExp(`\\$\\{${key}\\}`, 'g'), value);
+      }
+      return template;
+    }
+  } catch (error) {
+    console.warn(`Failed to load prompt template ${filename}:`, error);
+  }
+  return '';
+}
+
+const intentAnalysisPrompt = (variables: Record<string, string>) => 
+  loadPromptTemplate('intent-analysis.md', variables);
+
+const dagGenerationPrompt = (variables: Record<string, string>) => 
+  loadPromptTemplate('dag-generation.md', variables);
 
 export class LeaderAgent extends EventEmitter {
   private leaderAgentId: string = 'LEADER';
@@ -88,38 +113,18 @@ export class LeaderAgent extends EventEmitter {
       tools: a.tools,
     })), null, 2);
 
-    const prompt = `
-You are the Leader Agent for BiosBot. Your task is to analyze user input and determine the intent.
-
-## Available Agents
-${agentListJson}
-
-## Conversation History
-${historyText}
-
-## User Input
-${userInput}
-
-Analyze the user input and return a JSON object with the following structure:
-{
-  "confidenceScore": number (0.0 to 1.0),
-  "intentType": string,
-  "refinedGoal": string (refined and clear goal description),
-  "missingInfoQuestions": string[] (if confidence is low),
-  "requiredSkills": string[] (skills needed to complete this task)
-}
-
-If confidenceScore is below ${CONFIDENCE_THRESHOLD} or critical information is missing, set status to CLARIFICATION_NEEDED.
-Otherwise, set status to READY_TO_PLAN.
-
-Return only valid JSON, no other text.
-`;
+    const prompt = intentAnalysisPrompt({
+      agentListJson,
+      historyText,
+      userInput,
+      threshold: String(DEFAULT_CONFIDENCE_THRESHOLD),
+    });
 
     try {
       const response = await this.callLeaderModel(prompt);
       const result = JSON.parse(response);
 
-      if (result.confidenceScore < CONFIDENCE_THRESHOLD) {
+      if (result.confidenceScore < DEFAULT_CONFIDENCE_THRESHOLD) {
         return {
           status: 'CLARIFICATION_NEEDED',
           questions: result.missingInfoQuestions || ['Could you please provide more details?'],
@@ -208,35 +213,10 @@ Return only valid JSON, no other text.
       tools: a.tools,
     })), null, 2);
 
-    const prompt = `
-You are the Leader Agent for BiosBot. Your task is to decompose a user goal into executable subtasks.
-
-## Available Agents
-${agentListJson}
-
-## User Goal
-${goal}
-
-Decompose this goal into atomic subtasks. Each subtask should:
-1. Be assigned to exactly one agent (use the agent IDs from the available agents list)
-2. Have clear input and expected output
-3. Specify required skills for the task
-
-Return a JSON array of subtasks with this structure:
-[{
-  "id": "task_1",
-  "description": "Clear description of what this subtask does",
-  "assignedAgentId": "agent_id_from_list",
-  "requiredSkills": ["skill1", "skill2"],
-  "dependencies": [],
-  "inputSources": ["user_input"]
-}]
-
-IMPORTANT: You MUST only use agent IDs from the available agents list above.
-If no suitable agent exists for a task, do not include it in the list.
-
-Return only valid JSON array, no other text.
-`;
+    const prompt = dagGenerationPrompt({
+      agentListJson,
+      goal,
+    });
 
     try {
       const response = await this.callLeaderModel(prompt);
