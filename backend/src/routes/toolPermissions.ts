@@ -45,17 +45,33 @@ router.put('/:agentId', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid policy' });
     }
 
-    await db.insert(schema.agentToolPermissions)
-      .values({
-        agentId,
-        toolName,
-        policy,
-        updatedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: [schema.agentToolPermissions.agentId, schema.agentToolPermissions.toolName],
-        set: { policy, updatedAt: new Date() },
-      });
+    const existing = await db.select()
+      .from(schema.agentToolPermissions)
+      .where(
+        and(
+          eq(schema.agentToolPermissions.agentId, agentId),
+          eq(schema.agentToolPermissions.toolName, toolName)
+        )
+      );
+
+    if (existing.length > 0) {
+      await db.update(schema.agentToolPermissions)
+        .set({ policy, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.agentToolPermissions.agentId, agentId),
+            eq(schema.agentToolPermissions.toolName, toolName)
+          )
+        );
+    } else {
+      await db.insert(schema.agentToolPermissions)
+        .values({
+          agentId,
+          toolName,
+          policy,
+          updatedAt: new Date(),
+        });
+    }
 
     res.json({ success: true });
   } catch (error) {
