@@ -1,8 +1,12 @@
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { configManager } from '../services/configManager';
 import * as schema from './schema';
+import path from 'path';
 
-const sqlite = new Database(process.env.DB_PATH || './data/biosbot.db');
+const workspacePath = configManager.getWorkspacePath();
+const sqlitePath = path.join(workspacePath, 'database', 'biosbot.db');
+const sqlite = new Database(sqlitePath);
 sqlite.pragma('journal_mode = WAL');
 
 export const db = drizzle(sqlite, { schema });

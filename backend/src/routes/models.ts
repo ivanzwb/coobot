@@ -49,7 +49,12 @@ router.delete('/:id', async (req: Request, res: Response) => {
     await modelHub.deleteModel(req.params.id);
     res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ error: String(error) });
+    const message = String(error);
+    if (message.includes('正在被以下 Agent 使用')) {
+      res.status(400).json({ error: message });
+    } else {
+      res.status(500).json({ error: message });
+    }
   }
 });
 

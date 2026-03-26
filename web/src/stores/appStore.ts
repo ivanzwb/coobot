@@ -13,7 +13,7 @@ interface AppState {
   resourceMetrics: ResourceMetrics | null;
   sidebarOpen: boolean;
   currentView: 'chat' | 'agents' | 'knowledge' | 'settings';
-  
+
   fetchTasks: () => Promise<void>;
   fetchAgents: () => Promise<void>;
   fetchModels: () => Promise<void>;
@@ -99,7 +99,7 @@ export const useAppStore = create<AppState>((set) => ({
     try {
       await tasksApi.terminate(id);
       set(state => ({
-        tasks: state.tasks.map(t => 
+        tasks: state.tasks.map(t =>
           t.id === id ? { ...t, status: 'TERMINATED' as const } : t
         ),
       }));
@@ -132,7 +132,7 @@ export const useAppStore = create<AppState>((set) => ({
     try {
       await agentsApi.update(id, data);
       set(state => ({
-        agents: state.agents.map(a => 
+        agents: state.agents.map(a =>
           a.id === id ? { ...a, ...data } : a
         ),
       }));

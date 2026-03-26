@@ -1,29 +1,74 @@
 import { v4 as uuidv4 } from 'uuid';
 import { db, schema } from '../db';
 import { eq } from 'drizzle-orm';
-import type { TaskStatus, TaskInput, DAGNode, DomainAgentProfile, IntentResult } from '../types';
+import type { TaskStatus, TaskInput, DAGNode } from '../types';
 import type { Task } from '../db';
-import { agentCapabilityRegistry } from './agentCapabilityRegistry';
 import { agentRuntime } from './agentRuntime';
 import { EventEmitter } from 'events';
 import { eventBus } from './eventBus.js';
 import { leaderAgent } from './leaderAgent.js';
 import { logger } from './logger.js';
 import { memoryEngine } from './memoryEngine.js';
-import { knowledgeEngine } from './knowledgeEngine.js';
 
 export class TaskOrchestrator extends EventEmitter {
   private taskQueue: Map<string, Task> = new Map();
   private agentQueues: Map<string, string[]> = new Map();
+  private leaderTaskQueue: string[] = [];
+  private isLeaderTaskRunning: boolean = false;
   private heartbeatInterval: NodeJS.Timeout;
-  private leaderProcessingInterval: NodeJS.Timeout;
   private timeoutThreshold: number = 10 * 60 * 1000;
 
   constructor() {
     super();
     this.heartbeatInterval = setInterval(() => this.handleTimeout(), 30000);
-    this.leaderProcessingInterval = setInterval(() => this.processLeaderTasks(), 2000);
     this.loadQueuesFromDB();
+  }
+
+  async enqueueLeaderTask(taskId: string): Promise<void> {
+    if (!this.leaderTaskQueue.includes(taskId)) {
+      this.leaderTaskQueue.push(taskId);
+      logger.info('TaskOrchestrator', 'Task enqueued to leader queue', { taskId, queueLength: this.leaderTaskQueue.length });
+    }
+    await this.processLeaderQueue();
+  }
+
+  private async processLeaderQueue(): Promise<void> {
+    if (this.isLeaderTaskRunning) {
+      logger.debug('TaskOrchestrator', 'Leader task already running, waiting');
+      return;
+    }
+
+    if (this.leaderTaskQueue.length === 0) {
+      logger.debug('TaskOrchestrator', 'Leader queue empty');
+      return;
+    }
+
+    const taskId = this.leaderTaskQueue.shift()!;
+    this.isLeaderTaskRunning = true;
+    
+    logger.info('TaskOrchestrator', 'Processing leader task from queue', { taskId, remaining: this.leaderTaskQueue.length });
+
+    try {
+      const task = await this.getTask(taskId);
+      if (!task) {
+        logger.error('TaskOrchestrator', 'Task not found', { taskId });
+        return;
+      }
+
+      if (!this.taskQueue.has(task.id)) {
+        this.taskQueue.set(task.id, task as Task);
+      }
+
+      await this.updateTaskStatus(task.id, 'PARSING');
+      await leaderAgent.processTask(task as Task);
+    } catch (error) {
+      logger.error('TaskOrchestrator', 'Leader task failed', { taskId, error });
+    } finally {
+      this.isLeaderTaskRunning = false;
+      if (this.leaderTaskQueue.length > 0) {
+        setTimeout(() => this.processLeaderQueue(), 100);
+      }
+    }
   }
 
   private async loadQueuesFromDB(): Promise<void> {
@@ -53,7 +98,7 @@ export class TaskOrchestrator extends EventEmitter {
         .where(eq(schema.tasks.status, 'PARSING'));
 
       for (const task of staleParsingTasks) {
-        const staleAge = Date.now() - new Date(task.updatedAt).getTime();
+        const staleAge = task.updatedAt ? Date.now() - new Date(task.updatedAt).getTime() : 0;
         if (staleAge > 60000) {
           await db.update(schema.tasks)
             .set({ status: 'EXCEPTION', errorMsg: 'Task stale - process restarted', updatedAt: new Date() })
@@ -72,10 +117,10 @@ export class TaskOrchestrator extends EventEmitter {
 
   async createTask(input: TaskInput, triggerMode: 'immediate' | 'scheduled' | 'event_triggered' = 'immediate'): Promise<Task> {
     logger.info('TaskOrchestrator', 'Creating task', { triggerMode, input });
-    
+
     const taskId = uuidv4();
     const rootTaskId = taskId;
-    
+
     const task: Task = {
       id: taskId,
       parentTaskId: null as unknown as string,
@@ -112,12 +157,17 @@ export class TaskOrchestrator extends EventEmitter {
     this.emit('task_created', task);
     logger.info('TaskOrchestrator', 'Task created', { taskId, status: task.status });
 
+    await this.enqueueLeaderTask(taskId);
+
     return task;
   }
 
   async dispatchSubtasks(taskId: string, dag: DAGNode[]): Promise<void> {
     const parentTask = this.taskQueue.get(taskId);
-    if (!parentTask) return;
+    if (!parentTask) {
+      logger.error('TaskOrchestrator', 'Parent task not found in queue', { parentTaskId: taskId });
+      return;
+    }
 
     const deadlockError = this.detectDeadlock(dag);
     if (deadlockError) {
@@ -163,6 +213,12 @@ export class TaskOrchestrator extends EventEmitter {
 
       this.taskQueue.set(subtaskId, subtask);
       await this.enqueueToAgent(node.assignedAgentId, subtaskId);
+      logger.info('TaskOrchestrator', 'Subtask enqueued', { subtaskId, agentId: node.assignedAgentId, description: node.description });
+    }
+
+    logger.info('TaskOrchestrator', 'Triggering agent queues processing');
+    for (const node of dag) {
+      await this.processAgentQueue(node.assignedAgentId);
     }
 
     await this.updateTaskStatus(taskId, 'DISPATCHING');
@@ -172,11 +228,12 @@ export class TaskOrchestrator extends EventEmitter {
     const queue = this.agentQueues.get(agentId) || [];
     queue.push(taskId);
     this.agentQueues.set(agentId, queue);
+    logger.debug('TaskOrchestrator', 'Task enqueued to agent', { agentId, taskId, queueLength: queue.length });
   }
 
   private detectDeadlock(dag: DAGNode[]): string | null {
     const graph = new Map<string, string[]>();
-    
+
     for (const node of dag) {
       if (!graph.has(node.id)) {
         graph.set(node.id, []);
@@ -221,15 +278,18 @@ export class TaskOrchestrator extends EventEmitter {
 
   async dequeueFromAgent(agentId: string): Promise<string | null> {
     const queue = this.agentQueues.get(agentId);
+    logger.debug('TaskOrchestrator', 'Agent queue state', { agentId, queueLength: queue?.length || 0 });
     if (!queue || queue.length === 0) return null;
-    return queue.shift() || null;
+    const taskId = queue.shift() || null;
+    logger.debug('TaskOrchestrator', 'Dequeued task', { agentId, taskId, remaining: queue.length });
+    return taskId;
   }
 
   async getAgentQueueLength(agentId: string): Promise<number> {
     return this.agentQueues.get(agentId)?.length || 0;
   }
 
-  async updateTaskStatus(taskId: string, status: TaskStatus, errorMsg?: string): Promise<void> {
+  async updateTaskStatus(taskId: string, status: TaskStatus, errorMsg?: string, outputSummary?: string): Promise<void> {
     const task = this.taskQueue.get(taskId);
     if (!task) return;
 
@@ -249,11 +309,15 @@ export class TaskOrchestrator extends EventEmitter {
       task.errorMsg = errorMsg;
     }
 
-    logger.info('TaskOrchestrator', 'Task status changed', { 
-      taskId, 
-      previousStatus, 
-      newStatus: status, 
-      errorMsg 
+    if (outputSummary) {
+      task.outputSummary = outputSummary;
+    }
+
+    logger.info('TaskOrchestrator', 'Task status changed', {
+      taskId,
+      previousStatus,
+      newStatus: status,
+      errorMsg
     });
 
     const updateData: Record<string, unknown> = {
@@ -264,6 +328,7 @@ export class TaskOrchestrator extends EventEmitter {
     if (task.startedAt) updateData.startedAt = task.startedAt;
     if (task.finishedAt) updateData.finishedAt = task.finishedAt;
     if (task.errorMsg) updateData.errorMsg = task.errorMsg;
+    if (task.outputSummary) updateData.outputSummary = task.outputSummary;
 
     await db.update(schema.tasks)
       .set(updateData)
@@ -283,25 +348,35 @@ export class TaskOrchestrator extends EventEmitter {
   }
 
   private async processAgentQueue(agentId: string): Promise<void> {
+    logger.debug('TaskOrchestrator', 'Processing agent queue', { agentId });
+
     const nextTaskId = await this.dequeueFromAgent(agentId);
-    
+
     if (nextTaskId) {
+      logger.info('TaskOrchestrator', 'Dequeuing task for agent', { agentId, taskId: nextTaskId });
       await this.updateAgentStatus(agentId, 'RUNNING');
-      
+
       const nextTask = this.taskQueue.get(nextTaskId);
       if (nextTask) {
+        logger.info('TaskOrchestrator', 'Starting task execution', { taskId: nextTaskId, agentId, description: nextTask.inputPayload });
         await this.updateTaskStatus(nextTaskId, 'RUNNING');
-        
+
         const agents = await db.select()
           .from(schema.agents)
           .where(eq(schema.agents.id, agentId));
-        
+
         if (agents.length > 0) {
           const agentConfig = await this.buildAgentConfig(agents[0]);
+          logger.info('TaskOrchestrator', 'Executing task with agent', { taskId: nextTaskId, agentId: agentConfig.id, agentName: agentConfig.name });
           await agentRuntime.executeTask(nextTask, agentConfig);
+        } else {
+          logger.error('TaskOrchestrator', 'Agent not found in database', { agentId });
         }
+      } else {
+        logger.error('TaskOrchestrator', 'Task not found in queue', { taskId: nextTaskId });
       }
     } else {
+      logger.debug('TaskOrchestrator', 'No tasks in agent queue', { agentId });
       await this.updateAgentStatus(agentId, 'IDLE');
     }
   }
@@ -340,7 +415,7 @@ export class TaskOrchestrator extends EventEmitter {
     if (!task) return;
 
     task.heartbeat = new Date();
-    
+
     await db.update(schema.tasks)
       .set({ heartbeat: new Date() })
       .where(eq(schema.tasks.id, taskId));
@@ -350,7 +425,7 @@ export class TaskOrchestrator extends EventEmitter {
     await db.update(schema.agents)
       .set({ status, updatedAt: new Date() })
       .where(eq(schema.agents.id, agentId));
-    
+
     logger.info('TaskOrchestrator', 'Agent status updated', { agentId, status });
   }
 
@@ -375,7 +450,7 @@ export class TaskOrchestrator extends EventEmitter {
 
     const subtasks = await db.select().from(schema.tasks)
       .where(eq(schema.tasks.parentTaskId, taskId));
-    
+
     for (const subtask of subtasks) {
       if (subtask.status !== 'COMPLETED' && subtask.status !== 'TERMINATED') {
         await this.terminateTask(subtask.id);
@@ -399,7 +474,7 @@ export class TaskOrchestrator extends EventEmitter {
 
     const completedSteps = taskLogs.length;
     const lastStep = taskLogs[taskLogs.length - 1];
-    const interruptionPoint = lastStep 
+    const interruptionPoint = lastStep
       ? `Step ${lastStep.stepIndex}: ${lastStep.stepType} - ${lastStep.content.substring(0, 100)}`
       : 'No steps executed';
 
@@ -418,7 +493,7 @@ export class TaskOrchestrator extends EventEmitter {
   private async releaseAgentResources(agentId: string): Promise<void> {
     const runningTask = Array.from(this.taskQueue.values())
       .find(t => t.assignedAgentId === agentId && t.status === 'RUNNING');
-    
+
     if (runningTask) {
       this.taskQueue.delete(runningTask.id);
     }
@@ -445,54 +520,6 @@ export class TaskOrchestrator extends EventEmitter {
     return this.taskQueue.get(taskId) || (await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)))[0];
   }
 
-  private async processLeaderTasks(): Promise<void> {
-    try {
-      logger.info('TaskOrchestrator', 'Checking for leader tasks');
-      
-      const leaderTasks = await db.select()
-        .from(schema.tasks)
-        .where(eq(schema.tasks.status, 'WAITING_FOR_LEADER'));
-
-      logger.info('TaskOrchestrator', 'Found leader tasks', { count: leaderTasks.length });
-
-      if (leaderTasks.length === 0) return;
-
-      for (const task of leaderTasks) {
-        if (task.status !== 'WAITING_FOR_LEADER') continue;
-        
-        logger.info('TaskOrchestrator', 'Processing task', { taskId: task.id, status: task.status });
-        
-        const runningTasks = await db.select()
-          .from(schema.tasks)
-          .where(eq(schema.tasks.status, 'PARSING'));
-        
-        for (const rt of runningTasks) {
-          const staleAge = Date.now() - new Date(rt.updatedAt).getTime();
-          if (staleAge > 60000) {
-            await db.update(schema.tasks)
-              .set({ status: 'EXCEPTION', errorMsg: 'Stale PARSING task timeout', updatedAt: new Date() })
-              .where(eq(schema.tasks.id, rt.id));
-            logger.warn('TaskOrchestrator', 'Reset stale PARSING task', { taskId: rt.id });
-          } else {
-            logger.info('TaskOrchestrator', 'Task already in progress, skipping', { runningTaskId: rt.id });
-            return;
-          }
-        }
-        
-        await this.updateTaskStatus(task.id, 'PARSING');
-        
-        if (!this.taskQueue.has(task.id)) {
-          this.taskQueue.set(task.id, task as Task);
-        }
-        
-        await leaderAgent.processTask(task as Task);
-        break;
-      }
-    } catch (error) {
-      logger.error('TaskOrchestrator', 'Error processing leader tasks', error);
-    }
-  }
-
   async getTaskTree(rootTaskId: string): Promise<{ root: Task; children: Task[] }> {
     const root = await this.getTask(rootTaskId);
     if (!root) return { root: null as unknown as Task, children: [] };
@@ -506,9 +533,6 @@ export class TaskOrchestrator extends EventEmitter {
   destroy(): void {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
-    }
-    if (this.leaderProcessingInterval) {
-      clearInterval(this.leaderProcessingInterval);
     }
   }
 
@@ -529,7 +553,7 @@ export class TaskOrchestrator extends EventEmitter {
 
       if (observations.length > 50) {
         const summary = `Task completed. Key observations: ${observations.substring(0, 500)}`;
-        
+
         await memoryEngine.appendMessage(
           'assistant',
           summary,

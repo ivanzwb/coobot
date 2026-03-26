@@ -3,16 +3,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { db, schema } from '../db';
 import { eq } from 'drizzle-orm';
-import type { DomainAgentProfile, DAGNode, IntentResult, ValidationReport, UnassignableIssue, AgentConfig } from '../types';
+import type { DomainAgentProfile, DAGNode, ValidationReport, UnassignableIssue } from '../types';
 import type { Task } from '../db';
 import { agentCapabilityRegistry } from './agentCapabilityRegistry';
 import { taskOrchestrator } from './taskOrchestrator';
-import { agentRuntime } from './agentRuntime';
 import { memoryEngine } from './memoryEngine';
 import { eventBus } from './eventBus.js';
 import { logger } from './logger.js';
 import { modelHub } from './modelHub.js';
 import OpenAI from 'openai';
+import { ChatCompletionMessageParam } from 'openai/resources/chat/completions/completions.js';
 
 const PROMPTS_DIR = path.join(process.cwd(), 'src/config/prompts');
 const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
@@ -33,21 +33,18 @@ function loadPromptTemplate(filename: string, variables: Record<string, string>)
   return '';
 }
 
-const intentAnalysisPrompt = (variables: Record<string, string>) => 
-  loadPromptTemplate('intent-analysis.md', variables);
-
-const dagGenerationPrompt = (variables: Record<string, string>) => 
-  loadPromptTemplate('dag-generation.md', variables);
+const taskAnalysisPrompt = (variables: Record<string, string>) =>
+  loadPromptTemplate('task-analysis.md', variables);
 
 export class LeaderAgent extends EventEmitter {
   private leaderAgentId: string = 'LEADER';
 
   async processTask(task: Task): Promise<void> {
     logger.info('LeaderAgent', 'Processing task', { taskId: task.id });
-    
+
     try {
       await taskOrchestrator.updateTaskStatus(task.id, 'PARSING');
-      
+
       const inputPayload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
       const userInput = typeof inputPayload === 'string' ? inputPayload : inputPayload.content || '';
 
@@ -55,35 +52,62 @@ export class LeaderAgent extends EventEmitter {
 
       const availableAgents = await agentCapabilityRegistry.getActiveAgents();
 
-      const intentResult = await this.analyzeIntent(userInput, availableAgents);
-      logger.debug('LeaderAgent', 'Intent analyzed', { taskId: task.id, intent: intentResult.intentType, confidence: intentResult.confidenceScore });
+      const taskAnalysis = await this.analyzeTask(userInput, availableAgents);
+      logger.debug('LeaderAgent', 'Task analyzed', {
+        taskId: task.id,
+        intent: taskAnalysis.intentType,
+        confidence: taskAnalysis.confidenceScore,
+        subtaskCount: taskAnalysis.subtasks.length
+      });
 
-      if (intentResult.status === 'CLARIFICATION_NEEDED') {
+      if (taskAnalysis.confidenceScore < DEFAULT_CONFIDENCE_THRESHOLD || taskAnalysis.subtasks.length === 0) {
         await taskOrchestrator.updateTaskStatus(task.id, 'CLARIFICATION_PENDING');
-        this.emit('clarification_needed', { taskId: task.id, questions: intentResult.questions });
-        eventBus.emitClarificationNeeded(task.id, intentResult.questions || []);
-        return;
-      }
-
-      if (!intentResult.refinedGoal) {
-        throw new Error('Failed to analyze intent');
-      }
-
-      const dag = await this.generateDAG(intentResult.refinedGoal, availableAgents);
-      logger.debug('LeaderAgent', 'DAG generated', { taskId: task.id, nodeCount: dag.length });
-
-      const validation = await this.validateDAG(dag, availableAgents);
-      logger.debug('LeaderAgent', 'DAG validated', { taskId: task.id, validTasks: validation.dag.length, unassignable: validation.unassignableTasks.length });
-
-      if (validation.unassignableTasks.length > 0) {
-        await taskOrchestrator.updateTaskStatus(task.id, 'CLARIFICATION_PENDING');
-        const questions = this.generateClarificationQuestions(validation.unassignableTasks);
-        this.emit('clarification_needed', { taskId: task.id, questions });
+        const questions = taskAnalysis.clarificationQuestions || ['请提供更多信息以便我更好地理解您的需求'];
+        this.emit('clarification_needed', {
+          taskId: task.id,
+          questions,
+          reason: `confidenceScore (${taskAnalysis.confidenceScore}) below threshold`
+        });
         eventBus.emitClarificationNeeded(task.id, questions);
         return;
       }
 
-      await taskOrchestrator.dispatchSubtasks(task.id, validation.dag);
+      const validation = await this.validateDAG(taskAnalysis.subtasks, availableAgents);
+      logger.debug('LeaderAgent', 'DAG validated', {
+        taskId: task.id,
+        validTasks: validation.dag.length,
+        unassignable: validation.unassignableTasks.length,
+        availableAgentIds: availableAgents.map(a => a.agentId)
+      });
+
+      if (validation.unassignableTasks.length > 0 && availableAgents.length === 0) {
+        await taskOrchestrator.updateTaskStatus(task.id, 'EXCEPTION', '没有可用的 Agent');
+        this.emit('task_failed', { taskId: task.id, error: '没有可用的 Agent' });
+        return;
+      }
+
+      if (validation.unassignableTasks.length > 0 && availableAgents.length > 0) {
+        logger.warn('LeaderAgent', 'Some tasks have invalid agent IDs, reassigning to first available agent', {
+          taskId: task.id,
+          unassignable: validation.unassignableTasks,
+          fallbackAgentId: availableAgents[0].agentId
+        });
+
+        for (const node of taskAnalysis.subtasks) {
+          if (!availableAgents.some(a => a.agentId === node.assignedAgentId)) {
+            node.assignedAgentId = availableAgents[0].agentId;
+          }
+        }
+      }
+
+      const finalDag = taskAnalysis.subtasks.map(node => {
+        if (!availableAgents.some(a => a.agentId === node.assignedAgentId)) {
+          return { ...node, assignedAgentId: availableAgents[0].agentId };
+        }
+        return node;
+      });
+
+      await taskOrchestrator.dispatchSubtasks(task.id, finalDag);
       logger.info('LeaderAgent', 'Subtasks dispatched', { taskId: task.id, subtaskCount: validation.dag.length });
 
       await taskOrchestrator.updateAgentStatus('LEADER', 'IDLE');
@@ -99,10 +123,16 @@ export class LeaderAgent extends EventEmitter {
     }
   }
 
-  private async analyzeIntent(
+  private async analyzeTask(
     userInput: string,
     availableAgents: DomainAgentProfile[]
-  ): Promise<IntentResult> {
+  ): Promise<{
+    confidenceScore: number;
+    intentType: string;
+    refinedGoal: string;
+    clarificationQuestions: string[];
+    subtasks: DAGNode[];
+  }> {
     const context = await memoryEngine.getActiveHistory(5);
     const historyText = context.map(h => `${h.role}: ${h.content}`).join('\n');
 
@@ -113,43 +143,48 @@ export class LeaderAgent extends EventEmitter {
       tools: a.tools,
     })), null, 2);
 
-    const prompt = intentAnalysisPrompt({
+    logger.debug('LeaderAgent', 'Sending agent list to LLM', { agentIds: availableAgents.map(a => a.agentId) });
+
+    const prompt = taskAnalysisPrompt({
       agentListJson,
       historyText,
       userInput,
-      threshold: String(DEFAULT_CONFIDENCE_THRESHOLD),
     });
 
     try {
       const response = await this.callLeaderModel(prompt);
-      const result = JSON.parse(response);
-
-      if (result.confidenceScore < DEFAULT_CONFIDENCE_THRESHOLD) {
-        return {
-          status: 'CLARIFICATION_NEEDED',
-          questions: result.missingInfoQuestions || ['Could you please provide more details?'],
-          reason: 'Low confidence',
-        };
-      }
+      const cleanedResponse = response.replace(/```json\n?/g, '').replace(/```\n?$/g, '').trim();
+      const result = JSON.parse(cleanedResponse);
 
       return {
-        status: 'READY_TO_PLAN',
-        intent: result.intentType,
-        refinedGoal: result.refinedGoal,
-        questions: result.missingInfoQuestions,
+        confidenceScore: result.confidenceScore ?? 0.8,
+        intentType: result.intentType || 'general',
+        refinedGoal: result.refinedGoal || userInput,
+        clarificationQuestions: result.clarificationQuestions || [],
+        subtasks: result.subtasks || [],
       };
     } catch (error) {
-      console.error('Intent analysis failed:', error);
+      console.error('Task analysis failed:', error);
       return {
-        status: 'READY_TO_PLAN',
+        confidenceScore: 0.8,
+        intentType: 'general',
         refinedGoal: userInput,
+        clarificationQuestions: [],
+        subtasks: [{
+          id: 'task_1',
+          description: userInput,
+          assignedAgentId: availableAgents[0]?.agentId || 'LEADER',
+          requiredSkills: [],
+          dependencies: [],
+          inputSources: ['user_input'],
+        }],
       };
     }
   }
 
   private async callLeaderModel(prompt: string): Promise<string> {
     logger.info('LeaderAgent', 'Calling leader model', { promptLength: prompt.length });
-    
+
     try {
       const leaderAgent = await db.select()
         .from(schema.agents)
@@ -176,7 +211,7 @@ export class LeaderAgent extends EventEmitter {
       logger.info('LeaderAgent', 'Model config loaded', { provider: modelConfig.provider, model: modelConfig.modelName });
 
       logger.info('LeaderAgent', 'Creating OpenAI client', { baseUrl: modelConfig.baseUrl });
-      
+
       const client = new OpenAI({
         apiKey: modelConfig.apiKey || '',
         baseURL: modelConfig.baseUrl || undefined,
@@ -184,12 +219,12 @@ export class LeaderAgent extends EventEmitter {
       });
 
       logger.info('LeaderAgent', 'Calling OpenAI API');
-      const messages = [{ role: 'user', content: prompt }];
+      const messages: { role: 'user' | 'assistant' | 'system'; content: string }[] = [{ role: 'user', content: prompt }];
       logger.debug('LeaderAgent', 'LLM input', { model: modelConfig.modelName, messages });
 
       const response = await client.chat.completions.create({
         model: modelConfig.modelName,
-        messages,
+        messages: messages as ChatCompletionMessageParam[],
         temperature: 0.3,
       });
 
@@ -199,40 +234,6 @@ export class LeaderAgent extends EventEmitter {
     } catch (error) {
       logger.error('LeaderAgent', 'Model call failed', error);
       return '{"confidenceScore": 0.8, "intentType": "general", "refinedGoal": ""}';
-    }
-  }
-
-  private async generateDAG(
-    goal: string,
-    availableAgents: DomainAgentProfile[]
-  ): Promise<DAGNode[]> {
-    const agentListJson = JSON.stringify(availableAgents.map(a => ({
-      id: a.agentId,
-      name: a.name,
-      skills: a.skills,
-      tools: a.tools,
-    })), null, 2);
-
-    const prompt = dagGenerationPrompt({
-      agentListJson,
-      goal,
-    });
-
-    try {
-      const response = await this.callLeaderModel(prompt);
-      const cleanedResponse = response.replace(/```json\n?/g, '').replace(/```\n?$/g, '').trim();
-      const dag = JSON.parse(cleanedResponse);
-      return dag;
-    } catch (error) {
-      console.error('DAG generation failed:', error);
-      return [{
-        id: 'task_1',
-        description: goal,
-        assignedAgentId: availableAgents[0]?.agentId || 'LEADER',
-        requiredSkills: [],
-        dependencies: [],
-        inputSources: ['user_input'],
-      }];
     }
   }
 
@@ -284,13 +285,18 @@ export class LeaderAgent extends EventEmitter {
 
   private async watchSubTasksCompletion(parentTaskId: string): Promise<void> {
     const { root, children } = await taskOrchestrator.getTaskTree(parentTaskId);
-    
+
     const pendingTasks = children.filter(
       c => c.status !== 'COMPLETED' && c.status !== 'TERMINATED' && c.status !== 'EXCEPTION'
     );
 
     if (pendingTasks.length === 0) {
-      await taskOrchestrator.updateTaskStatus(parentTaskId, 'COMPLETED');
+      const subtaskResults = children
+        .filter(c => c.outputSummary)
+        .map(c => c.outputSummary)
+        .join('\n\n---\n\n');
+
+      await taskOrchestrator.updateTaskStatus(parentTaskId, 'COMPLETED', undefined, subtaskResults);
       this.emit('task_completed', { taskId: parentTaskId });
       return;
     }

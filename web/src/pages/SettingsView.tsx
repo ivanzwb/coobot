@@ -6,7 +6,6 @@ interface ModelFormData {
   name: string;
   provider: string;
   modelName: string;
-  type: 'local' | 'api';
   apiKey?: string;
   baseUrl?: string;
   contextWindow: number;
@@ -30,7 +29,6 @@ const SettingsView: React.FC = () => {
     name: '',
     provider: '',
     modelName: '',
-    type: 'api',
     apiKey: '',
     baseUrl: '',
     contextWindow: 4096,
@@ -90,7 +88,6 @@ const SettingsView: React.FC = () => {
           name: modelForm.name,
           provider: modelForm.provider,
           modelName: modelForm.modelName,
-          type: modelForm.type,
           contextWindow: modelForm.contextWindow,
           apiKey: modelForm.apiKey,
           baseUrl: modelForm.baseUrl,
@@ -100,7 +97,6 @@ const SettingsView: React.FC = () => {
           name: modelForm.name,
           provider: modelForm.provider,
           modelName: modelForm.modelName,
-          type: modelForm.type,
           contextWindow: modelForm.contextWindow,
           apiKey: modelForm.apiKey,
           baseUrl: modelForm.baseUrl,
@@ -112,7 +108,6 @@ const SettingsView: React.FC = () => {
         name: '',
         provider: '',
         modelName: '',
-        type: 'api',
         apiKey: '',
         baseUrl: '',
         contextWindow: 4096,
@@ -152,8 +147,9 @@ const SettingsView: React.FC = () => {
     try {
       await modelsApi.delete(modelId);
       loadModels();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to delete model:', error);
+      alert(error.response?.data?.error || '删除失败');
     }
   };
 
@@ -163,7 +159,6 @@ const SettingsView: React.FC = () => {
       name: model.name,
       provider: model.provider,
       modelName: model.modelName,
-      type: model.type,
       apiKey: model.apiKey || '',
       baseUrl: model.baseUrl || '',
       contextWindow: model.contextWindow || 4096,
@@ -186,7 +181,7 @@ const SettingsView: React.FC = () => {
 
       <div className="settings-section">
         <h3 className="settings-section-title">基本信息</h3>
-        
+
         <div className="settings-item">
           <span className="settings-label">系统名称</span>
           <input
@@ -217,16 +212,16 @@ const SettingsView: React.FC = () => {
 
       <div className="settings-section">
         <h3 className="settings-section-title">资源监控</h3>
-        
+
         <div className="settings-item">
           <span className="settings-label">CPU 告警阈值 (%)</span>
           <input
             type="number"
             className="form-input"
             value={config.resourceThresholds.cpu}
-            onChange={(e) => setConfig({ 
-              ...config, 
-              resourceThresholds: { ...config.resourceThresholds, cpu: parseInt(e.target.value) } 
+            onChange={(e) => setConfig({
+              ...config,
+              resourceThresholds: { ...config.resourceThresholds, cpu: parseInt(e.target.value) }
             })}
             style={{ width: 100 }}
           />
@@ -238,9 +233,9 @@ const SettingsView: React.FC = () => {
             type="number"
             className="form-input"
             value={config.resourceThresholds.memory}
-            onChange={(e) => setConfig({ 
-              ...config, 
-              resourceThresholds: { ...config.resourceThresholds, memory: parseInt(e.target.value) } 
+            onChange={(e) => setConfig({
+              ...config,
+              resourceThresholds: { ...config.resourceThresholds, memory: parseInt(e.target.value) }
             })}
             style={{ width: 100 }}
           />
@@ -249,7 +244,7 @@ const SettingsView: React.FC = () => {
 
       <div className="settings-section">
         <h3 className="settings-section-title">安全设置</h3>
-        
+
         <div className="settings-item">
           <span className="settings-label">授权等待超时（分钟）</span>
           <input
@@ -264,7 +259,7 @@ const SettingsView: React.FC = () => {
 
       <div className="settings-section">
         <h3 className="settings-section-title">备份设置</h3>
-        
+
         <div className="settings-item">
           <span className="settings-label">启用自动备份</span>
           <input
@@ -278,11 +273,22 @@ const SettingsView: React.FC = () => {
       <div className="settings-section">
         <div className="section-header">
           <h3 className="settings-section-title">模型配置</h3>
-          <button className="btn btn-primary" onClick={() => setShowModelForm(true)}>
+          <button className="btn btn-primary" onClick={() => {
+            setEditingModel(null);
+            setModelForm({
+              name: '',
+              provider: '',
+              modelName: '',
+              apiKey: '',
+              baseUrl: '',
+              contextWindow: 4096,
+            });
+            setShowModelForm(true);
+          }}>
             添加模型
           </button>
         </div>
-        
+
         <div className="model-list">
           {models.length === 0 ? (
             <p style={{ color: '#999', padding: '20px 0' }}>暂无模型，请添加</p>
@@ -302,20 +308,20 @@ const SettingsView: React.FC = () => {
                       {testResults[model.id].message}
                     </span>
                   )}
-                  <button 
+                  <button
                     className="btn btn-sm"
                     onClick={() => handleTestModel(model.id)}
                     disabled={testingModelId === model.id}
                   >
                     {testingModelId === model.id ? '测试中...' : '测试连接'}
                   </button>
-                  <button 
+                  <button
                     className="btn btn-sm"
                     onClick={() => handleEditModel(model)}
                   >
                     编辑
                   </button>
-                  <button 
+                  <button
                     className="btn btn-sm btn-danger"
                     onClick={() => handleDeleteModel(model.id)}
                   >
@@ -330,7 +336,7 @@ const SettingsView: React.FC = () => {
 
       <div className="settings-section">
         <h3 className="settings-section-title">健康检查</h3>
-        
+
         <div className="health-panel">
           <div className="health-item">
             <span className="health-label">数据库</span>
@@ -360,7 +366,7 @@ const SettingsView: React.FC = () => {
         <div className="modal-overlay" onClick={() => setShowModelForm(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <h3>{editingModel ? '编辑模型' : '添加模型'}</h3>
-            
+
             <div className="form-group">
               <label>模型名称</label>
               <input
@@ -373,26 +379,16 @@ const SettingsView: React.FC = () => {
             </div>
 
             <div className="form-group">
-              <label>模型类型</label>
-              <select
-                className="form-input"
-                value={modelForm.type}
-                onChange={(e) => setModelForm({ ...modelForm, type: e.target.value as 'api' | 'local' })}
-              >
-                <option value="api">API</option>
-                <option value="local">本地</option>
-              </select>
-            </div>
-
-            <div className="form-group">
               <label>提供商</label>
-              <input
-                type="text"
+              <select
                 className="form-input"
                 value={modelForm.provider}
                 onChange={(e) => setModelForm({ ...modelForm, provider: e.target.value })}
-                placeholder="例如: openai, anthropic"
-              />
+              >
+                <option value="">选择提供商</option>
+                <option value="openai">OpenAI</option>
+                <option value="openrouter">OpenRouter</option>
+              </select>
             </div>
 
             <div className="form-group">
@@ -406,31 +402,27 @@ const SettingsView: React.FC = () => {
               />
             </div>
 
-            {modelForm.type === 'api' && (
-              <>
-                <div className="form-group">
-                  <label>API Key</label>
-                  <input
-                    type="password"
-                    className="form-input"
-                    value={modelForm.apiKey}
-                    onChange={(e) => setModelForm({ ...modelForm, apiKey: e.target.value })}
-                    placeholder="sk-..."
-                  />
-                </div>
+            <div className="form-group">
+              <label>API Key</label>
+              <input
+                type="password"
+                className="form-input"
+                value={modelForm.apiKey}
+                onChange={(e) => setModelForm({ ...modelForm, apiKey: e.target.value })}
+                placeholder="sk-..."
+              />
+            </div>
 
-                <div className="form-group">
-                  <label>Base URL</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    value={modelForm.baseUrl}
-                    onChange={(e) => setModelForm({ ...modelForm, baseUrl: e.target.value })}
-                    placeholder="https://api.openai.com/v1"
-                  />
-                </div>
-              </>
-            )}
+            <div className="form-group">
+              <label>Base URL</label>
+              <input
+                type="text"
+                className="form-input"
+                value={modelForm.baseUrl}
+                onChange={(e) => setModelForm({ ...modelForm, baseUrl: e.target.value })}
+                placeholder="https://api.openai.com/v1"
+              />
+            </div>
 
             <div className="form-group">
               <label>上下文窗口</label>
@@ -443,6 +435,20 @@ const SettingsView: React.FC = () => {
             </div>
 
             <div className="modal-actions">
+              {editingModel && (
+                <button
+                  className="btn btn-danger"
+                  onClick={() => {
+                    if (confirm('确定要删除这个模型吗？')) {
+                      handleDeleteModel(editingModel.id);
+                      setShowModelForm(false);
+                    }
+                  }}
+                >
+                  删除
+                </button>
+              )}
+              <div style={{ flex: 1 }} />
               <button className="btn" onClick={() => setShowModelForm(false)}>取消</button>
               <button className="btn btn-primary" onClick={handleSaveModel}>保存</button>
             </div>

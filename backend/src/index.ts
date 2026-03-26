@@ -1,8 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import * as path from 'path';
-import * as fs from 'fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';
 import routes from './routes/index.js';
@@ -18,30 +16,23 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-const workspacePath = configManager.getWorkspacePath();
-const dataDir = path.join(workspacePath, 'data');
-
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-
-process.env.DB_PATH = path.join(dataDir, 'biosbot.db');
+process.env.DB_PATH = configManager.getDatabasePath();
 
 async function bootstrap() {
   try {
     logger.initialize();
     logger.info('Bootstrap', 'Starting BiosBot server...');
-    
+
     await configManager.load();
     await configManager.ensureWorkspaceInitialized();
-    
+
     await initializeDatabase();
     await vectorStore.initialize();
     await agentCapabilityRegistry.loadFromDatabase();
-    
+
     schedulerService.start();
     monitorService.startMonitoring();
-    
+
     setInterval(() => {
       memoryEngine.archiveEligibleHistory().catch(err => {
         logger.error('Archive', 'Failed to archive history', err);
@@ -53,7 +44,7 @@ async function bootstrap() {
     const server = createServer(app);
 
     const wss = new WebSocketServer({ server, path: '/ws' });
-    
+
     wss.on('connection', (ws: WebSocket) => {
       logger.info('WebSocket', 'Client connected');
       eventBus.addClient(ws);
@@ -62,7 +53,7 @@ async function bootstrap() {
         try {
           const data = JSON.parse(message.toString());
           logger.debug('WebSocket', 'Received message', data);
-          
+
           if (data.type === 'subscribe_task' && data.taskId) {
             ws.send(JSON.stringify({
               type: 'subscribed',
@@ -83,7 +74,7 @@ async function bootstrap() {
     server.listen(PORT, () => {
       logger.info('Server', `Server running on http://localhost:${PORT}`);
       logger.info('Server', `WebSocket running on ws://localhost:${PORT}/ws`);
-      logger.info('Server', `Workspace: ${workspacePath}`);
+      logger.info('Server', `Workspace: ${configManager.getWorkspacePath()}`);
     });
 
   } catch (error) {

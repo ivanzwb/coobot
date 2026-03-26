@@ -67,6 +67,28 @@ export class ConfigManager {
     return this.config.workspacePath;
   }
 
+  getDatabasePath(): string {
+    const workspacePath = configManager.getWorkspacePath();
+    const databaseDir = path.join(workspacePath, 'database');
+
+    if (!fs.existsSync(databaseDir)) {
+      fs.mkdirSync(databaseDir, { recursive: true });
+    }
+
+    return path.join(databaseDir, 'biosbot.db');
+  }
+
+  getMemoryVectorStorePath(): string {
+    const workspacePath = configManager.getWorkspacePath();
+    const vectorStoreDir = path.join(workspacePath, 'database', 'vectors');
+
+    if (!fs.existsSync(vectorStoreDir)) {
+      fs.mkdirSync(vectorStoreDir, { recursive: true });
+    }
+
+    return vectorStoreDir;
+  }
+
   getConfig(): SystemConfig {
     return this.config;
   }
@@ -74,7 +96,7 @@ export class ConfigManager {
   async ensureWorkspaceInitialized(): Promise<void> {
     const workspacePath = this.config.workspacePath;
 
-    const subdirs = ['config', 'agents', 'knowledge', 'logs', 'backup', 'data'];
+    const subdirs = ['config', 'agents', 'database', 'knowledge', 'logs', 'backup'];
 
     for (const subdir of subdirs) {
       const fullPath = path.join(workspacePath, subdir);

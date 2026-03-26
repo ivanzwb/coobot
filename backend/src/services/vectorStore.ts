@@ -1,6 +1,5 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { v4 as uuidv4 } from 'uuid';
 import { configManager } from './configManager';
 
 export interface VectorChunk {
@@ -38,12 +37,7 @@ export class VectorStore {
   private agentIndexes: Map<string, Map<string, EmbeddingRecord>> = new Map();
 
   async initialize(): Promise<void> {
-    const workspacePath = configManager.getWorkspacePath();
-    this.dataDir = path.join(workspacePath, 'data', 'vectors');
-
-    if (!fs.existsSync(this.dataDir)) {
-      fs.mkdirSync(this.dataDir, { recursive: true });
-    }
+    this.dataDir = configManager.getMemoryVectorStorePath();
 
     this.loadAllIndexes();
   }
@@ -166,17 +160,17 @@ export class VectorStore {
 
   private cosineSimilarity(a: number[], b: number[]): number {
     if (a.length !== b.length) return 0;
-    
+
     let dotProduct = 0;
     let normA = 0;
     let normB = 0;
-    
+
     for (let i = 0; i < a.length; i++) {
       dotProduct += a[i] * b[i];
       normA += a[i] * a[i];
       normB += b[i] * b[i];
     }
-    
+
     if (normA === 0 || normB === 0) return 0;
     return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   }
@@ -194,7 +188,7 @@ export class VectorStore {
     } catch (error) {
       console.error('Failed to get embedding from API, using fallback:', error);
     }
-    
+
     return this.simpleEmbedding(text);
   }
 
@@ -230,7 +224,7 @@ export class VectorStore {
     try {
       const openaiApiKey = process.env.OPENAI_API_KEY;
       const openaiBaseUrl = process.env.OPENAI_BASE_URL;
-      
+
       if (!openaiApiKey) {
         console.warn('OPENAI_API_KEY not set, using fallback embedding');
         return null;

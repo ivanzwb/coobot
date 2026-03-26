@@ -9,7 +9,7 @@ export const tasksApi = {
   getAll: () => api.get<Task[]>('/tasks'),
   getById: (id: string) => api.get<Task>(`/tasks/${id}`),
   getTree: (id: string) => api.get(`/tasks/${id}/tree`),
-  create: (data: { content: string; attachments?: unknown[] }) => 
+  create: (data: { content: string; attachments?: unknown[] }) =>
     api.post<Task>('/tasks', data),
   terminate: (id: string) => api.post(`/tasks/${id}/terminate`),
   clarify: (id: string) => api.post(`/tasks/${id}/clarify`),
@@ -29,9 +29,9 @@ export const agentsApi = {
 
 export const modelsApi = {
   getAll: () => api.get<Model[]>('/models'),
-  create: (data: { name: string; provider: string; modelName: string; type: string; contextWindow?: number; apiKey?: string; baseUrl?: string }) =>
+  create: (data: { name: string; provider: string; modelName: string; contextWindow?: number; apiKey?: string; baseUrl?: string }) =>
     api.post<Model>('/models', data),
-  update: (id: string, data: { name?: string; provider?: string; modelName?: string; type?: string; contextWindow?: number; apiKey?: string; baseUrl?: string }) =>
+  update: (id: string, data: { name?: string; provider?: string; modelName?: string; contextWindow?: number; apiKey?: string; baseUrl?: string }) =>
     api.put<Model>(`/models/${id}`, data),
   test: (id: string) => api.post(`/models/${id}/test`),
   delete: (id: string) => api.delete(`/models/${id}`),

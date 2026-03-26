@@ -1,18 +1,14 @@
 import { EventEmitter } from 'events';
-import { v4 as uuidv4 } from 'uuid';
 import { db, schema } from '../db';
-import { eq, and } from 'drizzle-orm';
-import type { DomainAgentProfile, IntentResult, DAGNode, PermissionResult } from '../types';
+import { eq } from 'drizzle-orm';
 import type { ModelConfig as DbModelConfig } from '../db';
 import type { Task } from '../db';
-import { agentCapabilityRegistry } from './agentCapabilityRegistry';
 import { knowledgeEngine } from './knowledgeEngine';
 import { memoryEngine } from './memoryEngine';
 import { toolHub } from './toolHub';
-import { securitySandbox } from './securitySandbox';
 import { taskOrchestrator } from './taskOrchestrator';
-import { modelHub } from './modelHub';
 import { eventBus } from './eventBus.js';
+import { logger } from './logger.js';
 import OpenAI from 'openai';
 
 export interface ReActStep {
@@ -48,13 +44,13 @@ export class AgentRuntime extends EventEmitter {
 
   async executeTask(task: Task, agentConfig: AgentConfig): Promise<void> {
     logger.info('AgentRuntime', 'Starting task execution', { taskId: task.id, agentId: agentConfig.id, agentName: agentConfig.name });
-    
+
     const abortController = new AbortController();
     this.runningTasks.set(task.id, { abortController, isRunning: true });
 
     try {
       await taskOrchestrator.updateTaskStatus(task.id, 'RUNNING');
-      
+
       await db.insert(schema.taskLogs).values({
         taskId: task.id,
         stepIndex: 0,
@@ -65,7 +61,7 @@ export class AgentRuntime extends EventEmitter {
 
       const context = await this.buildContext(task, agentConfig);
       logger.debug('AgentRuntime', 'Context built', { taskId: task.id, contextLength: context.systemPrompt.length });
-      
+
       const steps = await this.runReActLoop(task, agentConfig, context);
       logger.debug('AgentRuntime', 'ReAct loop completed', { taskId: task.id, stepsCount: steps.length });
 
@@ -73,12 +69,12 @@ export class AgentRuntime extends EventEmitter {
       await memoryEngine.appendMessage('assistant', finalOutput, [], task.id);
       logger.info('AgentRuntime', 'Task completed, response saved to memory', { taskId: task.id, outputLength: finalOutput.length });
 
-      await taskOrchestrator.updateTaskStatus(task.id, 'COMPLETED');
-      
+      await taskOrchestrator.updateTaskStatus(task.id, 'COMPLETED', undefined, finalOutput);
+
       this.emit('task_completed', { taskId: task.id, steps });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      
+
       await db.insert(schema.taskLogs).values({
         taskId: task.id,
         stepIndex: 0,
@@ -95,8 +91,15 @@ export class AgentRuntime extends EventEmitter {
   }
 
   private async buildContext(task: Task, agentConfig: AgentConfig): Promise<AgentExecutionContext> {
-    const inputPayload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
-    const userInput = typeof inputPayload === 'string' ? inputPayload : inputPayload.content || inputPayload.description || '';
+    let inputPayload: any = {};
+    try {
+      inputPayload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
+    } catch {
+      inputPayload = { content: task.inputPayload };
+    }
+    const userInput = inputPayload.content || inputPayload.description || '';
+
+    logger.debug('AgentRuntime', 'Building context', { taskId: task.id, userInputLength: userInput.length });
 
     const history = await memoryEngine.getActiveHistory(10);
     const historyMessages = history.map(h => ({
@@ -131,17 +134,39 @@ export class AgentRuntime extends EventEmitter {
   }
 
   private async buildSystemPrompt(agentConfig: AgentConfig): Promise<string> {
-    const basePrompt = `You are ${agentConfig.name}, a specialized AI agent.`;
+    let basePrompt = `你是一个专业的 AI 助手。请始终使用与用户输入相同的语言进行回复。`;
 
-    const toolsPrompt = agentConfig.tools.length > 0
-      ? `\n\nAvailable tools:\n${agentConfig.tools.map(t => `- ${t}`).join('\n')}`
+    if (agentConfig.promptTemplateId) {
+      const promptRecords = await db.select()
+        .from(schema.prompts)
+        .where(eq(schema.prompts.id, agentConfig.promptTemplateId));
+      
+      if (promptRecords.length > 0 && promptRecords[0].content) {
+        basePrompt = promptRecords[0].content;
+      }
+    }
+
+    const toolsText = agentConfig.tools.length > 0
+      ? `\n可用工具：\n${agentConfig.tools.map(t => `- ${t}`).join('\n')}`
+      : '\n可用工具：无';
+
+    const skillsText = agentConfig.skills.length > 0
+      ? `\n技能：${agentConfig.skills.join(', ')}`
       : '';
 
-    const skillsPrompt = agentConfig.skills.length > 0
-      ? `\n\nSkills: ${agentConfig.skills.join(', ')}`
-      : '';
+    if (basePrompt.includes('${tools}')) {
+      basePrompt = basePrompt.replace('${tools}', toolsText);
+    } else {
+      basePrompt += toolsText;
+    }
 
-    return basePrompt + toolsPrompt + skillsPrompt;
+    if (basePrompt.includes('${skills}')) {
+      basePrompt = basePrompt.replace('${skills}', skillsText);
+    } else if (skillsText) {
+      basePrompt += skillsText;
+    }
+
+    return basePrompt;
   }
 
   private async runReActLoop(
@@ -152,8 +177,14 @@ export class AgentRuntime extends EventEmitter {
     const steps: ReActStep[] = [];
     let stepIndex = 0;
 
-    const payload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
-    let currentContext = `${context.systemPrompt}\n\nUser request: ${payload.content || payload}\n`;
+    let payload: any = {};
+    try {
+      payload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
+    } catch {
+      payload = { content: task.inputPayload };
+    }
+    const userRequest = payload.content || payload.description || '';
+    let currentContext = `${context.systemPrompt}\n\nUser request: ${userRequest}\n`;
 
     if (context.knowledgeContext) {
       currentContext += `\n\nRelevant knowledge:\n${context.knowledgeContext}\n`;
@@ -165,9 +196,9 @@ export class AgentRuntime extends EventEmitter {
 
     while (stepIndex < this.maxReActSteps) {
       logger.debug('AgentRuntime', 'ReAct step', { taskId: task.id, stepIndex, type: 'THOUGHT' });
-      
+
       const thought = await this.callModel(currentContext, agentConfig.modelConfig);
-      
+
       const thoughtStep: ReActStep = {
         stepIndex: stepIndex++,
         stepType: 'THOUGHT',
@@ -177,7 +208,7 @@ export class AgentRuntime extends EventEmitter {
       await this.logStep(task.id, thoughtStep);
 
       const action = this.parseAction(thought);
-      
+
       if (!action) {
         logger.debug('AgentRuntime', 'ReAct completed (no action)', { taskId: task.id, totalSteps: stepIndex });
         break;
@@ -194,9 +225,9 @@ export class AgentRuntime extends EventEmitter {
       await this.logStep(task.id, actionStep);
 
       logger.debug('AgentRuntime', 'ReAct step', { taskId: task.id, stepIndex, type: 'ACTION', toolName: action.name });
-      
+
       const observation = await this.executeTool(agentConfig.id, action.name, action.args);
-      
+
       const observationStep: ReActStep = {
         stepIndex: stepIndex++,
         stepType: 'OBSERVATION',
@@ -229,7 +260,7 @@ export class AgentRuntime extends EventEmitter {
         timeout: 60000,
       });
 
-      const messages = [{ role: 'user', content: prompt }];
+      const messages = [{ role: 'user' as const, content: prompt }];
       logger.debug('AgentRuntime', 'LLM input', { model: modelConfig.modelName, messages });
 
       const response = await client.chat.completions.create({
@@ -250,7 +281,7 @@ export class AgentRuntime extends EventEmitter {
 
   private parseAction(thought: string): { name: string; args: Record<string, unknown> } | null {
     const actionMatch = thought.match(/Action:\s*(\w+)\(([^)]+)\)/i);
-    
+
     if (!actionMatch) {
       const finalMatch = thought.match(/Final Answer:?\s*(.+)/i);
       if (finalMatch) {
@@ -277,7 +308,7 @@ export class AgentRuntime extends EventEmitter {
 
     try {
       const result = await toolHub.execute(agentId, toolName, args);
-      
+
       if (result.success) {
         return result.output || 'Tool executed successfully';
       } else {

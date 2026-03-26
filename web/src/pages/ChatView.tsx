@@ -1,27 +1,64 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { tasksApi } from '../api';
+import { useWebSocket, useTaskEvents } from '../hooks/useWebSocket';
 
 const ChatView: React.FC = () => {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [clarificationTask, setClarificationTask] = useState<any>(null);
+  const [clarificationQuestions, setClarificationQuestions] = useState<string[]>([]);
   const [clarificationAnswer, setClarificationAnswer] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { createTask, tasks, fetchTasks } = useAppStore();
+  useWebSocket();
+  const { lastMessage } = useTaskEvents();
 
   useEffect(() => {
-    fetchTasks();
-  }, [fetchTasks]);
+    if (!lastMessage) return;
+
+    const { type, data } = lastMessage as { type: string; data: any };
+
+    if (type === 'clarification_needed') {
+      setClarificationQuestions(data.questions || []);
+      fetchTasks();
+    } else if (type === 'task_status_changed') {
+      fetchTasks();
+    } else if (type === 'task_completed') {
+      fetchTasks();
+    } else if (type === 'task_failed') {
+      fetchTasks();
+    }
+  }, [lastMessage, fetchTasks]);
 
   useEffect(() => {
     const pendingTask = tasks.find(t => t.status === 'CLARIFICATION_PENDING');
-    setClarificationTask(pendingTask || null);
-  }, [tasks]);
+    if (pendingTask && !clarificationTask) {
+      setClarificationTask(pendingTask);
+    }
+  }, [tasks, clarificationTask]);
+
+  useEffect(() => {
+    fetchTasks();
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [tasks]);
+
+  const sortedTasks = [...tasks].sort((a, b) =>
+    new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+
+  const formatTime = (dateStr: string) => {
+    const date = new Date(dateStr);
+    return date.toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
 
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
@@ -39,11 +76,12 @@ const ChatView: React.FC = () => {
 
   const handleClarificationSubmit = async () => {
     if (!clarificationTask || !clarificationAnswer.trim()) return;
-    
+
     try {
       await tasksApi.clarify(clarificationTask.id);
       setClarificationTask(null);
       setClarificationAnswer('');
+      setClarificationQuestions([]);
     } catch (error) {
       console.error('Failed to submit clarification:', error);
     }
@@ -51,12 +89,26 @@ const ChatView: React.FC = () => {
 
   const handleClarificationCancel = async () => {
     if (!clarificationTask) return;
-    
+
     try {
       setClarificationTask(null);
       setClarificationAnswer('');
+      setClarificationQuestions([]);
     } catch (error) {
       console.error('Failed to cancel clarification:', error);
+    }
+  };
+
+  const handleRetry = async (taskId: string) => {
+    const task = tasks.find(t => t.id === taskId);
+    if (!task) return;
+
+    try {
+      const inputPayload = JSON.parse(task.inputPayload);
+      const content = inputPayload.content || inputPayload.description || task.inputPayload;
+      await createTask(content);
+    } catch (error) {
+      console.error('Failed to retry task:', error);
     }
   };
 
@@ -88,34 +140,37 @@ const ChatView: React.FC = () => {
       <header className="chat-header">
         <h1>对话</h1>
       </header>
-      
+
       <div className="chat-messages">
         {tasks.length === 0 ? (
           <div style={{ textAlign: 'center', color: '#999', marginTop: 40 }}>
             <p>开始一个新对话吧</p>
           </div>
         ) : (
-          tasks.map(task => (
+          sortedTasks.map(task => (
             <div key={task.id} className="message">
               <div className="message-content">
-                <div style={{ marginBottom: 8, fontWeight: 500 }}>
-                  {JSON.parse(task.inputPayload).content || task.inputPayload}
+                <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>
+                  {formatTime(task.createdAt)}
                 </div>
-                <div style={{ 
-                  fontSize: 12, 
-                  color: task.status === 'COMPLETED' ? '#52c41a' : 
+                <div style={{ marginBottom: 8, fontWeight: 500 }}>
+                  { JSON.parse(task.inputPayload).description }
+                </div>
+                <div style={{
+                  fontSize: 12,
+                  color: task.status === 'COMPLETED' ? '#52c41a' :
                          task.status === 'EXCEPTION' ? '#ff4d4f' : '#999',
                   marginBottom: 8
                 }}>
                   {getStatusText(task.status)}
                 </div>
-                
+
                 {task.status === 'RUNNING' && (
-                  <div style={{ 
-                    background: '#f5f5f5', 
-                    padding: 12, 
+                  <div style={{
+                    background: '#f5f5f5',
+                    padding: 12,
                     borderRadius: 4,
-                    marginTop: 8 
+                    marginTop: 8
                   }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                       <span style={{ fontSize: 16 }}>🤔</span>
@@ -128,11 +183,11 @@ const ChatView: React.FC = () => {
                 )}
 
                 {(task.status === 'PARSING' || task.status === 'DISPATCHING') && (
-                  <div style={{ 
-                    background: '#e6f7ff', 
-                    padding: 12, 
+                  <div style={{
+                    background: '#e6f7ff',
+                    padding: 12,
                     borderRadius: 4,
-                    marginTop: 8 
+                    marginTop: 8
                   }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <span style={{ fontSize: 16 }}>📋</span>
@@ -149,16 +204,23 @@ const ChatView: React.FC = () => {
                     <div style={{ whiteSpace: 'pre-wrap' }}>{task.outputSummary}</div>
                   </div>
                 )}
-                
+
                 {task.errorMsg && (
-                  <div style={{ 
-                    marginTop: 8, 
-                    padding: 8, 
-                    background: '#fff2f0', 
+                  <div style={{
+                    marginTop: 8,
+                    padding: 8,
+                    background: '#fff2f0',
                     borderRadius: 4,
                     color: '#ff4d4f'
                   }}>
-                    ❌ 错误: {task.errorMsg}
+                    <div>❌ 错误: {task.errorMsg}</div>
+                    <button
+                      className="btn btn-sm"
+                      style={{ marginTop: 8 }}
+                      onClick={() => handleRetry(task.id)}
+                    >
+                      重试
+                    </button>
                   </div>
                 )}
               </div>
@@ -184,9 +246,17 @@ const ChatView: React.FC = () => {
           zIndex: 1000,
         }}>
           <div style={{ fontWeight: 500, marginBottom: 8 }}>⚠️ 需要澄清</div>
-          <div style={{ marginBottom: 12, color: '#666' }}>
-            您的请求不够明确，请补充信息：
-          </div>
+          {clarificationQuestions.length > 0 ? (
+            <div style={{ marginBottom: 12, color: '#666' }}>
+              {clarificationQuestions.map((q, i) => (
+                <div key={i} style={{ marginBottom: 8 }}>• {q}</div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ marginBottom: 12, color: '#666' }}>
+              您的请求不够明确，请补充信息：
+            </div>
+          )}
           <textarea
             value={clarificationAnswer}
             onChange={(e) => setClarificationAnswer(e.target.value)}
@@ -201,14 +271,14 @@ const ChatView: React.FC = () => {
             }}
           />
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button 
-              className="btn" 
+            <button
+              className="btn"
               onClick={handleClarificationCancel}
             >
               取消
             </button>
-            <button 
-              className="btn btn-primary" 
+            <button
+              className="btn btn-primary"
               onClick={handleClarificationSubmit}
               disabled={!clarificationAnswer.trim()}
             >
@@ -228,8 +298,8 @@ const ChatView: React.FC = () => {
             onKeyDown={handleKeyDown}
             rows={1}
           />
-          <button 
-            className="send-button" 
+          <button
+            className="send-button"
             onClick={handleSend}
             disabled={isLoading || !input.trim()}
           >

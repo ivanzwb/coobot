@@ -117,6 +117,15 @@ export class ModelHub {
   }
 
   async deleteModel(modelId: string): Promise<void> {
+    const agentsUsingModel = await db.select()
+      .from(schema.agents)
+      .where(eq(schema.agents.modelConfigId, modelId));
+
+    if (agentsUsingModel.length > 0) {
+      const agentNames = agentsUsingModel.map(a => a.name).join(', ');
+      throw new Error(`模型正在被以下 Agent 使用: ${agentNames}`);
+    }
+
     await db.delete(schema.modelConfigs)
       .where(eq(schema.modelConfigs.id, modelId));
   }
