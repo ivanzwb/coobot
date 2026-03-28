@@ -48,8 +48,6 @@ export class LeaderAgent extends EventEmitter {
       const inputPayload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
       const userInput = typeof inputPayload === 'string' ? inputPayload : inputPayload.content || '';
 
-      await memoryEngine.appendMessage('user', userInput, [], task.id);
-
       const availableAgents = await agentCapabilityRegistry.getActiveAgents();
 
       const taskAnalysis = await this.analyzeTask(userInput, availableAgents);
@@ -139,8 +137,8 @@ export class LeaderAgent extends EventEmitter {
     const agentListJson = JSON.stringify(availableAgents.map(a => ({
       id: a.agentId,
       name: a.name,
-      skills: a.skills,
-      tools: a.tools,
+      description: a.description,
+      constraints: a.constraints
     })), null, 2);
 
     logger.debug('LeaderAgent', 'Sending agent list to LLM', { agentIds: availableAgents.map(a => a.agentId) });
@@ -164,21 +162,9 @@ export class LeaderAgent extends EventEmitter {
         subtasks: result.subtasks || [],
       };
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       console.error('Task analysis failed:', error);
-      return {
-        confidenceScore: 0.8,
-        intentType: 'general',
-        refinedGoal: userInput,
-        clarificationQuestions: [],
-        subtasks: [{
-          id: 'task_1',
-          description: userInput,
-          assignedAgentId: availableAgents[0]?.agentId || 'LEADER',
-          requiredSkills: [],
-          dependencies: [],
-          inputSources: ['user_input'],
-        }],
-      };
+      throw new Error(`任务分析失败: ${errorMessage}`);
     }
   }
 
@@ -215,7 +201,7 @@ export class LeaderAgent extends EventEmitter {
       const client = new OpenAI({
         apiKey: modelConfig.apiKey || '',
         baseURL: modelConfig.baseUrl || undefined,
-        timeout: 60000,
+        timeout: 600000,
       });
 
       logger.info('LeaderAgent', 'Calling OpenAI API');
@@ -228,12 +214,16 @@ export class LeaderAgent extends EventEmitter {
         temperature: 0.3,
       });
 
-      const result = response.choices[0]?.message?.content || '{"confidenceScore": 0.8, "intentType": "general", "refinedGoal": ""}';
+      const result = response.choices[0]?.message?.content;
+      if (!result) {
+        throw new Error('Model returned empty response');
+      }
       logger.debug('LeaderAgent', 'LLM output', { model: modelConfig.modelName, output: result });
       return result;
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       logger.error('LeaderAgent', 'Model call failed', error);
-      return '{"confidenceScore": 0.8, "intentType": "general", "refinedGoal": ""}';
+      throw new Error(`模型调用失败: ${errorMessage}`);
     }
   }
 

@@ -6,8 +6,10 @@ import type { JobStatus, ScheduledJobConfig } from '../types';
 import type { ScheduledJob } from '../db';
 import { taskOrchestrator } from './taskOrchestrator';
 
+type CronScheduledTask = ReturnType<typeof cron.schedule>;
+
 export class SchedulerService {
-  private activeJobs: Map<string, cron.ScheduledTask> = new Map();
+  private activeJobs: Map<string, CronScheduledTask> = new Map();
   private scanIntervalMs: number = 60000;
   private scanInterval!: NodeJS.Timeout;
   private isRunning: boolean = false;

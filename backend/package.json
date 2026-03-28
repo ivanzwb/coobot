@@ -12,36 +12,35 @@
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
-    "@lancedb/lancedb": "^0.26.2",
+    "@lancedb/lancedb": "^0.27.1",
     "archiver": "^7.0.1",
     "better-sqlite3": "^12.8.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "drizzle-orm": "^0.29.3",
-    "express": "^4.18.2",
+    "dotenv": "^17.3.1",
+    "drizzle-orm": "0.45.2",
+    "express": "^5.2.1",
     "mammoth": "^1.6.0",
-    "node-cron": "^3.0.3",
-    "openai": "^6.32.0",
+    "node-cron": "^4.2.1",
+    "openai": "^6.33.0",
     "pdf-lib": "^1.17.1",
-    "pdf-parse": "^1.1.1",
-    "sharp": "^0.33.2",
-    "uuid": "^9.0.1",
+    "pdf-parse": "^2.4.5",
+    "sharp": "^0.34.5",
+    "uuid": "^13.0.0",
     "winston": "^3.11.0",
     "ws": "^8.16.0",
-    "zod": "^3.22.4"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/archiver": "^7.0.0",
     "@types/better-sqlite3": "^7.6.8",
     "@types/cors": "^2.8.17",
-    "@types/express": "^4.17.21",
-    "@types/node": "^20.11.5",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.5.0",
     "@types/node-cron": "^3.0.11",
-    "@types/pdf-parse": "^1.1.5",
-    "@types/uuid": "^9.0.7",
+    "@types/uuid": "^10.0.0",
     "@types/ws": "^8.5.10",
-    "drizzle-kit": "^0.20.9",
+    "drizzle-kit": "^0.31.10",
     "tsx": "^4.7.0",
-    "typescript": "^5.3.3"
+    "typescript": "^6.0.2"
   }
 }

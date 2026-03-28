@@ -88,7 +88,7 @@ router.post('/ltm', async (req: Request, res: Response) => {
     const { agentId, category, key, value, confidence } = req.body;
     
     const id = await memoryEngine.saveToLtm({
-      agentId: agentId || 'GLOBAL',
+      agentId: agentId || 'LEADER',
       category,
       key,
       value,

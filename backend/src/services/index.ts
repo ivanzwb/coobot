@@ -22,7 +22,7 @@ export { logger, type LogLevel, type LogEntry } from './logger.js';
 export { permissionRequestService, PermissionRequestService, type PermissionRequest } from './permissionRequestService.js';
 
 import { db, schema } from '../db/index.js';
-import { eq } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { toolHub } from './toolHub.js';
 
 export async function initializeDatabase(): Promise<void> {
@@ -60,8 +60,8 @@ export async function initializeDatabase(): Promise<void> {
   const existingCap = await db.select().from(schema.agentCapabilities)
     .where(eq(schema.agentCapabilities.agentId, 'LEADER'));
 
+  const defaultTools = toolHub.listTools().map(t => t.name);
   if (existingCap.length === 0) {
-    const defaultTools = toolHub.listTools().map(t => t.name);
     
     await db.insert(schema.agentCapabilities).values({
       agentId: 'LEADER',
@@ -73,8 +73,9 @@ export async function initializeDatabase(): Promise<void> {
       lastHeartbeat: new Date(),
       updatedAt: new Date(),
     });
+  }
 
-    const defaultToolPolicies: Record<string, string> = {
+  const defaultToolPolicies: Record<string, string> = {
       read_file: 'ASK',
       edit_file: 'ASK',
       write_file: 'ASK',
@@ -82,16 +83,23 @@ export async function initializeDatabase(): Promise<void> {
       exec_shell: 'DENY',
       http_request: 'ASK',
       system_info: 'ALLOW',
-    };
+  };
+  for (const toolName of defaultTools) {
+    const existingPerm = await db.select().from(schema.agentToolPermissions)
+      .where(and(
+        eq(schema.agentToolPermissions.agentId, 'LEADER'),
+        eq(schema.agentToolPermissions.toolName, toolName)
+      ));
 
-    for (const toolName of defaultTools) {
+    if (existingPerm.length === 0) {
       const policy = defaultToolPolicies[toolName] || 'DENY';
       await db.insert(schema.agentToolPermissions).values({
         agentId: 'LEADER',
         toolName,
         policy,
         updatedAt: new Date(),
-      }).onConflictDoNothing();
+      });
     }
   }
 }
+

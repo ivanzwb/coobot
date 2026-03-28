@@ -11,12 +11,12 @@ router.post('/', async (req: Request, res: Response) => {
 
     logger.info('Chat', 'User input received', { content, attachments });
 
-    const messageId = await memoryEngine.appendMessage('user', content, attachments);
-
     const task = await taskOrchestrator.createTask({
       content,
       attachments,
     }, 'immediate');
+
+    const messageId = await memoryEngine.appendMessage('user', content, attachments, task.id);
 
     res.status(201).json({
       messageId,

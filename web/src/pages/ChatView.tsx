@@ -9,6 +9,7 @@ const ChatView: React.FC = () => {
   const [clarificationTask, setClarificationTask] = useState<any>(null);
   const [clarificationQuestions, setClarificationQuestions] = useState<string[]>([]);
   const [clarificationAnswer, setClarificationAnswer] = useState('');
+  const [isClarificationSubmitting, setIsClarificationSubmitting] = useState(false);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { createTask, tasks, fetchTasks } = useAppStore();
@@ -46,11 +47,12 @@ const ChatView: React.FC = () => {
   }, [lastMessage, fetchTasks]);
 
   useEffect(() => {
+    if (isClarificationSubmitting) return;
     const pendingTask = tasks.find(t => t.status === 'CLARIFICATION_PENDING');
     if (pendingTask && !clarificationTask) {
       setClarificationTask(pendingTask);
     }
-  }, [tasks, clarificationTask]);
+  }, [tasks, clarificationTask, isClarificationSubmitting]);
 
   useEffect(() => {
     fetchTasks();
@@ -93,40 +95,54 @@ const ChatView: React.FC = () => {
   };
 
   const handleClarificationSubmit = async () => {
-    if (!clarificationTask || !clarificationAnswer.trim()) return;
+    if (!clarificationTask || !clarificationAnswer.trim() || isClarificationSubmitting) return;
 
+    setIsClarificationSubmitting(true);
     try {
-      await tasksApi.clarify(clarificationTask.id);
+      await tasksApi.clarify(clarificationTask.id, { content: clarificationAnswer });
       setClarificationTask(null);
       setClarificationAnswer('');
       setClarificationQuestions([]);
     } catch (error) {
       console.error('Failed to submit clarification:', error);
+    } finally {
+      setIsClarificationSubmitting(false);
     }
   };
 
   const handleClarificationCancel = async () => {
     if (!clarificationTask) return;
 
+    setIsClarificationSubmitting(true);
     try {
       setClarificationTask(null);
       setClarificationAnswer('');
       setClarificationQuestions([]);
     } catch (error) {
       console.error('Failed to cancel clarification:', error);
+    } finally {
+      setIsClarificationSubmitting(false);
     }
   };
 
   const handleRetry = async (taskId: string) => {
     const task = tasks.find(t => t.id === taskId);
-    if (!task) return;
+    if (!task) {
+      console.log('[handleRetry] Task not found:', taskId);
+      return;
+    }
+
+    console.log('[handleRetry] Retrying task:', taskId);
 
     try {
       const inputPayload = JSON.parse(task.inputPayload);
       const content = inputPayload.content || inputPayload.description || task.inputPayload;
-      await createTask(content);
+      console.log('[handleRetry] Content:', content);
+      await chatApi.send({ content });
+      fetchTasks();
+      fetchChatHistory();
     } catch (error) {
-      console.error('Failed to retry task:', error);
+      console.error('[handleRetry] Failed to retry task:', error);
     }
   };
 
@@ -134,6 +150,21 @@ const ChatView: React.FC = () => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+    }
+  };
+
+  const handleExport = async (format: 'markdown' | 'txt') => {
+    try {
+      const res = await chatApi.exportChat({ format, includeArchived: false });
+      const blob = res.data as Blob;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `chat_export_${Date.now()}.${format === 'markdown' ? 'md' : 'txt'}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('Export failed:', e);
     }
   };
 
@@ -155,8 +186,12 @@ const ChatView: React.FC = () => {
 
   return (
     <div className="chat-container">
-      <header className="chat-header">
-        <h1>对话</h1>
+      <header className="chat-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <h1 style={{ margin: 0 }}>对话</h1>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button type="button" className="btn btn-sm" onClick={() => handleExport('markdown')}>导出 Markdown</button>
+          <button type="button" className="btn btn-sm" onClick={() => handleExport('txt')}>导出 TXT</button>
+        </div>
       </header>
 
       <div className="chat-messages">

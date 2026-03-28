@@ -146,7 +146,11 @@ export class AgentRuntime extends EventEmitter {
       }
     }
 
-    logger.debug('AgentRuntime', `${agentConfig.id}:${agentConfig.name}, tools: ${agentConfig.tools}, skills: ${agentConfig.skills}`)
+    logger.info('AgentRuntime', 'Building system prompt', {
+      agentId: agentConfig.id,
+      tools: agentConfig.tools,
+      skills: agentConfig.skills
+    })
     const toolsText = agentConfig.tools.length > 0
       ? `\n可用工具：\n${agentConfig.tools.map(t => `- ${t}`).join('\n')}`
       : '';

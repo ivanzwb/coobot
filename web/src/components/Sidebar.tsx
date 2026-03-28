@@ -13,6 +13,8 @@ const Sidebar: React.FC = () => {
     { key: '/knowledge', label: '知识库', icon: '📚' },
     { key: '/prompts', label: 'Prompt', icon: '📝' },
     { key: '/skills', label: 'Skills', icon: '🛠️' },
+    { key: '/memory', label: '记忆', icon: '🧠' },
+    { key: '/scheduler', label: '定时任务', icon: '⏰' },
     { key: '/monitor', label: '监控', icon: '📊' },
     { key: '/settings', label: '设置', icon: '⚙️' },
   ];

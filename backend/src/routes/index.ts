@@ -13,9 +13,11 @@ import authRouter from './auth.js';
 import toolPermissionsRouter from './toolPermissions.js';
 import auditRouter from './audit.js';
 import permissionRequestsRouter from './permissionRequests.js';
+import metricsRouter from './metrics.js';
 
 const router = Router();
 
+router.use('/v1/metrics', metricsRouter);
 router.use('/v1/tasks', tasksRouter);
 router.use('/v1/agents', agentsRouter);
 router.use('/v1/models', modelsRouter);

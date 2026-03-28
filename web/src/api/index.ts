@@ -20,6 +20,14 @@ export const chatApi = {
     api.post('/chat', data),
   getHistory: (limit?: number, offset?: number) =>
     api.get<ChatMessage[]>('/chat', { params: { limit, offset } }),
+  exportChat: (opts?: { format?: 'markdown' | 'txt'; includeArchived?: boolean }) =>
+    api.get<Blob>('/chat/export', {
+      params: {
+        format: opts?.format ?? 'markdown',
+        includeArchived: opts?.includeArchived ?? false,
+      },
+      responseType: 'blob',
+    }),
 };
 
 export const tasksApi = {
@@ -29,7 +37,8 @@ export const tasksApi = {
   create: (data: { content: string; attachments?: unknown[] }) =>
     api.post<Task>('/tasks', data),
   terminate: (id: string) => api.post(`/tasks/${id}/terminate`),
-  clarify: (id: string) => api.post(`/tasks/${id}/clarify`),
+  clarify: (id: string, clarificationData?: Record<string, unknown>) =>
+    api.post(`/tasks/${id}/clarify`, { clarificationData }),
 };
 
 export const agentsApi = {
@@ -66,6 +75,7 @@ export const knowledgeApi = {
 };
 
 export const memoryApi = {
+  getDashboard: () => api.get('/memory/dashboard'),
   getHistory: (limit?: number, offset?: number) =>
     api.get<Message[]>('/memory/history', { params: { limit, offset } }),
   getStm: (limit?: number) => api.get<Message[]>('/memory/stm', { params: { limit } }),
@@ -89,11 +99,22 @@ export const systemApi = {
 
 export const schedulerApi = {
   getJobs: () => api.get<ScheduledJob[]>('/scheduler/jobs'),
-  createJob: (data: Partial<ScheduledJob>) => api.post('/scheduler/jobs', data),
-  updateJob: (id: string, data: Partial<ScheduledJob>) => api.put(`/scheduler/jobs/${id}`, data),
+  getJob: (id: string) => api.get<ScheduledJob>(`/scheduler/jobs/${id}`),
+  getStatus: () => api.get('/scheduler/status'),
+  createJob: (data: {
+    name: string;
+    description?: string;
+    cronExpression: string;
+    taskTemplate: { prompt: string; targetAgentId: string; attachments?: string[]; clarificationData?: Record<string, unknown> | null };
+    timezone?: string;
+    concurrencyPolicy?: 'FORBID' | 'ALLOW' | 'REPLACE';
+  }) => api.post('/scheduler/jobs', data),
+  updateJob: (id: string, data: Partial<ScheduledJob> & { enabled?: boolean }) => api.put(`/scheduler/jobs/${id}`, data),
   deleteJob: (id: string) => api.delete(`/scheduler/jobs/${id}`),
   triggerNow: (id: string) => api.post(`/scheduler/jobs/${id}/trigger`),
   getLogs: (jobId: string) => api.get(`/scheduler/jobs/${jobId}/logs`),
+  enableJob: (id: string) => api.post(`/scheduler/jobs/${id}/enable`),
+  disableJob: (id: string) => api.post(`/scheduler/jobs/${id}/disable`),
 };
 
 export default api;

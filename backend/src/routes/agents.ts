@@ -1,8 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { db, schema } from '../db/index.js';
-import { eq } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { agentCapabilityRegistry, toolHub } from '../services/index.js';
+import { agentCapabilityRegistry, toolHub, knowledgeEngine } from '../services/index.js';
 
 const router = Router();
 
@@ -46,6 +46,73 @@ router.get('/', async (_req: Request, res: Response) => {
     });
 
     res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+/** Doc 06 alias: same as POST /api/v1/knowledge/:agentId/upload */
+router.post('/:id/knowledge/upload', async (req: Request, res: Response) => {
+  try {
+    const { file, overwriteVersion } = req.body;
+    const knowledgeFile = await knowledgeEngine.ingestFile(
+      file,
+      req.params.id,
+      overwriteVersion
+    );
+    res.status(201).json(knowledgeFile);
+  } catch (error) {
+    const errorStr = String(error);
+    if (errorStr.startsWith('VERSION_CONFLICT:')) {
+      const conflictData = JSON.parse(errorStr.replace('VERSION_CONFLICT:', ''));
+      return res.status(409).json({
+        error: 'VERSION_CONFLICT',
+        ...conflictData,
+      });
+    }
+    res.status(500).json({ error: errorStr });
+  }
+});
+
+/** Doc 06 alias: same as PUT /api/v1/tools/permissions/:agentId */
+router.put('/:id/tools/permissions', async (req: Request, res: Response) => {
+  try {
+    const { toolName, policy } = req.body;
+    const agentId = req.params.id;
+
+    if (!['DENY', 'ASK', 'ALLOW'].includes(policy)) {
+      return res.status(400).json({ error: 'Invalid policy' });
+    }
+
+    const existing = await db.select()
+      .from(schema.agentToolPermissions)
+      .where(
+        and(
+          eq(schema.agentToolPermissions.agentId, agentId),
+          eq(schema.agentToolPermissions.toolName, toolName)
+        )
+      );
+
+    if (existing.length > 0) {
+      await db.update(schema.agentToolPermissions)
+        .set({ policy, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.agentToolPermissions.agentId, agentId),
+            eq(schema.agentToolPermissions.toolName, toolName)
+          )
+        );
+    } else {
+      await db.insert(schema.agentToolPermissions)
+        .values({
+          agentId,
+          toolName,
+          policy,
+          updatedAt: new Date(),
+        });
+    }
+
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }

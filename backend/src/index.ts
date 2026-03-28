@@ -3,8 +3,9 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';
+import cron from 'node-cron';
 import routes from './routes/index.js';
-import { configManager, initializeDatabase, schedulerService, agentCapabilityRegistry, taskOrchestrator, vectorStore, monitorService, memoryEngine, logger } from './services/index.js';
+import { configManager, initializeDatabase, schedulerService, agentCapabilityRegistry, taskOrchestrator, vectorStore, monitorService, memoryEngine, logger, backupService } from './services/index.js';
 import { eventBus } from './services/eventBus.js';
 
 dotenv.config();
@@ -38,6 +39,12 @@ async function bootstrap() {
         logger.error('Archive', 'Failed to archive history', err);
       });
     }, 60 * 60 * 1000);
+
+    cron.schedule('0 2 * * *', () => {
+      backupService.runDailyBackup().catch(err => {
+        logger.error('Backup', 'Daily backup failed', err);
+      });
+    });
 
     app.use('/api', routes);
 

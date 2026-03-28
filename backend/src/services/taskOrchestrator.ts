@@ -157,7 +157,9 @@ export class TaskOrchestrator extends EventEmitter {
     this.emit('task_created', task);
     logger.info('TaskOrchestrator', 'Task created', { taskId, status: task.status });
 
-    await this.enqueueLeaderTask(taskId);
+    this.enqueueLeaderTask(taskId).catch(err => {
+      logger.error('TaskOrchestrator', 'Failed to enqueue leader task', { taskId, error: err });
+    });
 
     return task;
   }
@@ -399,14 +401,37 @@ export class TaskOrchestrator extends EventEmitter {
       }
     }
 
+    const capabilities = await db.select()
+      .from(schema.agentCapabilities)
+      .where(eq(schema.agentCapabilities.agentId, agent.id));
+
+    let skills: string[] = [];
+    let tools: string[] = [];
+
+    if (capabilities.length > 0) {
+      try {
+        skills = JSON.parse(capabilities[0].skillsJson || '[]');
+        tools = JSON.parse(capabilities[0].toolsJson || '[]');
+      } catch (e) {
+        logger.warn('TaskOrchestrator', 'Failed to parse capabilities JSON', { agentId: agent.id, e });
+      }
+    }
+
+    logger.info('TaskOrchestrator', 'buildAgentConfig', {
+      agentId: agent.id,
+      capabilitiesFound: capabilities.length,
+      tools,
+      skills
+    });
+
     return {
       id: agent.id,
       name: agent.name,
       type: agent.type,
       modelConfig,
       promptTemplateId: agent.promptTemplateId,
-      skills: [],
-      tools: [],
+      skills,
+      tools,
     };
   }
 
@@ -513,6 +538,15 @@ export class TaskOrchestrator extends EventEmitter {
         await this.updateTaskStatus(task.id, 'EXCEPTION', 'Task timeout');
         this.emit('task_timeout', task);
       }
+    }
+  }
+
+  /** Keep in-memory task row in sync after persisting `inputPayload` (e.g. clarification). */
+  patchTaskInputPayload(taskId: string, inputPayloadJson: string): void {
+    const task = this.taskQueue.get(taskId);
+    if (task) {
+      task.inputPayload = inputPayloadJson;
+      task.updatedAt = new Date();
     }
   }
 

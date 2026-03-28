@@ -74,7 +74,7 @@ export class MemoryEngine {
     const summary = `Archive containing ${records.length} messages from ${records[0].createdAt ? new Date(records[0].createdAt).toISOString() : 'unknown'}`;
 
     const ltmId = await this.saveToLtm({
-      agentId: 'GLOBAL',
+      agentId: 'LEADER',
       category: 'summary',
       key: `History Summary ${new Date().toISOString()}`,
       value: summary,
