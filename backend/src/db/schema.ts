@@ -9,6 +9,7 @@ export const modelConfigs = sqliteTable('model_configs', {
   baseUrl: text('base_url'),
   apiKey: text('api_key'),
   contextWindow: integer('context_window'),
+  temperature: real('temperature'),
   status: text('status').default('offline'),
   createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
@@ -19,7 +20,6 @@ export const agents = sqliteTable('agents', {
   name: text('name').notNull(),
   type: text('type').notNull(),
   modelConfigId: text('model_config_id').references(() => modelConfigs.id),
-  promptTemplateId: text('prompt_template_id'),
   temperature: real('temperature'),
   status: text('status').default('IDLE'),
   createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
@@ -30,8 +30,9 @@ export const agentCapabilities = sqliteTable('agent_capabilities', {
   agentId: text('agent_id').primaryKey().references(() => agents.id),
   skillsJson: text('skills_json').notNull(),
   toolsJson: text('tools_json').notNull(),
-  description: text('description'),
-  constraints: text('constraints'),
+  rolePrompt: text('role_prompt'),
+  behaviorRules: text('behavior_rules'),
+  capabilityBoundary: text('capability_boundary'),
   lastHeartbeat: integer('last_heartbeat', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
   status: text('status').default('OFFLINE'),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
@@ -60,17 +61,6 @@ export const agentSkills = sqliteTable('agent_skills', {
   agentId: text('agent_id').notNull().references(() => agents.id),
   skillId: text('skill_id').notNull().references(() => skills.id),
   configJson: text('config_json'),
-});
-
-export const prompts = sqliteTable('prompts', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  description: text('description'),
-  content: text('content').notNull(),
-  variablesJson: text('variables_json'),
-  tags: text('tags'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
-  updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
 });
 
 export const agentToolPermissions = sqliteTable('agent_tool_permissions', {

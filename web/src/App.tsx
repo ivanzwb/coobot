@@ -4,7 +4,6 @@ import Sidebar from './components/Sidebar';
 import ChatView from './pages/ChatView';
 import AgentsView from './pages/AgentsView';
 import SettingsView from './pages/SettingsView';
-import PromptsView from './pages/PromptsView';
 import SkillsView from './pages/SkillsView';
 import TaskDetailView from './pages/TaskDetailView';
 import MonitorView from './pages/MonitorView';
@@ -26,7 +25,6 @@ function App() {
             <Route path="/chat" element={<ChatView />} />
             <Route path="/agents" element={<AgentsView />} />
             <Route path="/knowledge" element={<KnowledgeView />} />
-            <Route path="/prompts" element={<PromptsView />} />
             <Route path="/skills" element={<SkillsView />} />
             <Route path="/monitor" element={<MonitorView />} />
             <Route path="/memory" element={<MemoryView />} />

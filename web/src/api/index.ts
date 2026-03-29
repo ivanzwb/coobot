@@ -41,11 +41,30 @@ export const tasksApi = {
     api.post(`/tasks/${id}/clarify`, { clarificationData }),
 };
 
+export interface AgentCreateInput {
+  name: string;
+  type?: 'LEADER' | 'DOMAIN';
+  modelConfigId?: string | null;
+  temperature?: number | null;
+  rolePrompt?: string;
+  behaviorRules?: string;
+  capabilityBoundary?: string;
+}
+
+export interface AgentUpdateInput {
+  name: string;
+  modelConfigId?: string | null;
+  temperature?: number | null;
+  rolePrompt?: string;
+  behaviorRules?: string;
+  capabilityBoundary?: string;
+}
+
 export const agentsApi = {
   getAll: () => api.get<Agent[]>('/agents'),
   getById: (id: string) => api.get<Agent>(`/agents/${id}`),
-  create: (data: Partial<Agent>) => api.post<Agent>('/agents', data),
-  update: (id: string, data: Partial<Agent>) => api.put<Agent>(`/agents/${id}`, data),
+  create: (data: AgentCreateInput) => api.post<Agent>('/agents', data),
+  update: (id: string, data: AgentUpdateInput) => api.put<Agent>(`/agents/${id}`, data),
   delete: (id: string) => api.delete(`/agents/${id}`),
   addSkill: (agentId: string, skillId: string, config?: unknown) =>
     api.post(`/agents/${agentId}/skills`, { skillId, config }),
@@ -55,9 +74,9 @@ export const agentsApi = {
 
 export const modelsApi = {
   getAll: () => api.get<Model[]>('/models'),
-  create: (data: { name: string; provider: string; modelName: string; contextWindow?: number; apiKey?: string; baseUrl?: string }) =>
+  create: (data: { name: string; provider: string; modelName: string; contextWindow?: number; apiKey?: string; baseUrl?: string; temperature?: number }) =>
     api.post<Model>('/models', data),
-  update: (id: string, data: { name?: string; provider?: string; modelName?: string; contextWindow?: number; apiKey?: string; baseUrl?: string }) =>
+  update: (id: string, data: { name?: string; provider?: string; modelName?: string; contextWindow?: number; apiKey?: string; baseUrl?: string; temperature?: number }) =>
     api.put<Model>(`/models/${id}`, data),
   test: (id: string) => api.post(`/models/${id}/test`),
   delete: (id: string) => api.delete(`/models/${id}`),

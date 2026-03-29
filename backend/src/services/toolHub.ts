@@ -17,7 +17,7 @@ export interface ToolResult {
   error?: string;
 }
 
-abstract class BaseTool {
+export abstract class BaseTool {
   abstract name: string;
   abstract description: string;
   abstract parameters: Record<string, unknown>;
@@ -239,7 +239,6 @@ class FileWriteTool extends BaseTool {
     path: { type: 'string', required: true, description: '要写入的文件路径' },
     content: { type: 'string', required: true, description: '要写入的内容' },
   };
-  readonly riskLevel: 'low' | 'medium' | 'high' = 'high';
 
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
     try {
@@ -346,7 +345,6 @@ class SystemInfoTool extends BaseTool {
   name = 'system_info';
   description = 'Get system information';
   parameters = {};
-  readonly riskLevel: 'low' | 'medium' | 'high' = 'low';
 
   async execute(_args: Record<string, unknown>): Promise<ToolResult> {
     return {
@@ -428,6 +426,28 @@ export class ToolHub {
 
   register(tool: BaseTool): void {
     this.tools.set(tool.name, tool);
+  }
+
+  unregisterTool(name: string): boolean {
+    return this.tools.delete(name);
+  }
+
+  registerCustomTool(tool: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+    handler: (args: Record<string, unknown>) => Promise<ToolResult>;
+  }): void {
+    const customTool = new (class extends BaseTool {
+      name = tool.name;
+      description = tool.description;
+      parameters = tool.parameters;
+
+      async execute(args: Record<string, unknown>): Promise<ToolResult> {
+        return tool.handler(args);
+      }
+    })();
+    this.tools.set(tool.name, customTool);
   }
 
   getTool(name: string): BaseTool | undefined {

@@ -9,6 +9,7 @@ interface ModelFormData {
   apiKey?: string;
   baseUrl?: string;
   contextWindow: number;
+  temperature: number;
 }
 
 interface HealthStatus {
@@ -32,6 +33,7 @@ const SettingsView: React.FC = () => {
     apiKey: '',
     baseUrl: '',
     contextWindow: 4096,
+    temperature: 0.3,
   });
   const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
@@ -91,6 +93,7 @@ const SettingsView: React.FC = () => {
           contextWindow: modelForm.contextWindow,
           apiKey: modelForm.apiKey,
           baseUrl: modelForm.baseUrl,
+          temperature: modelForm.temperature,
         });
       } else {
         await modelsApi.create({
@@ -100,6 +103,7 @@ const SettingsView: React.FC = () => {
           contextWindow: modelForm.contextWindow,
           apiKey: modelForm.apiKey,
           baseUrl: modelForm.baseUrl,
+          temperature: modelForm.temperature,
         });
       }
       setShowModelForm(false);
@@ -111,6 +115,7 @@ const SettingsView: React.FC = () => {
         apiKey: '',
         baseUrl: '',
         contextWindow: 4096,
+        temperature: 0.3
       });
       loadModels();
     } catch (error) {
@@ -162,6 +167,7 @@ const SettingsView: React.FC = () => {
       apiKey: model.apiKey || '',
       baseUrl: model.baseUrl || '',
       contextWindow: model.contextWindow || 4096,
+      temperature: model.temperature ?? 0.3,
     });
     setShowModelForm(true);
   };
@@ -282,6 +288,7 @@ const SettingsView: React.FC = () => {
               apiKey: '',
               baseUrl: '',
               contextWindow: 4096,
+              temperature: 0.3
             });
             setShowModelForm(true);
           }}>
@@ -432,6 +439,20 @@ const SettingsView: React.FC = () => {
                 value={modelForm.contextWindow}
                 onChange={(e) => setModelForm({ ...modelForm, contextWindow: parseInt(e.target.value) })}
               />
+            </div>
+
+            <div className="form-group">
+              <label>Temperature: {modelForm.temperature}</label>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.1"
+                value={modelForm.temperature}
+                onChange={(e) => setModelForm({ ...modelForm, temperature: parseFloat(e.target.value) })}
+                style={{ width: '100%' }}
+              />
+              <div style={{ fontSize: 12, color: '#666' }}>较低的值产生更确定性的输出，较高的值产生更多样化的输出</div>
             </div>
 
             <div className="modal-actions">

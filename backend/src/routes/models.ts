@@ -14,14 +14,16 @@ router.get('/', async (_req: Request, res: Response) => {
 
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { name, type, provider, modelName, baseUrl, apiKey, contextWindow } = req.body;
+    const { name, provider, modelName, baseUrl, apiKey, contextWindow, temperature } = req.body;
     
     const model = await modelHub.registerModel({
+      name,
       provider,
       modelName,
       baseUrl,
       apiKey,
       contextWindow,
+      temperature,
     });
 
     res.status(201).json(model);
@@ -46,7 +48,7 @@ router.post('/:id/test', async (req: Request, res: Response) => {
 
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
-    await modelHub.deleteModel(req.params.id);
+    await modelHub.deleteModel(req.params.id as string);
     res.json({ success: true });
   } catch (error) {
     const message = String(error);
@@ -60,14 +62,15 @@ router.delete('/:id', async (req: Request, res: Response) => {
 
 router.put('/:id', async (req: Request, res: Response) => {
   try {
-    const { name, provider, modelName, baseUrl, apiKey, contextWindow } = req.body;
-    await modelHub.updateModel(req.params.id, {
+    const { name, provider, modelName, baseUrl, apiKey, contextWindow, temperature } = req.body;
+    await modelHub.updateModel(req.params.id as string, {
       name,
       provider,
       modelName,
       baseUrl,
       apiKey,
       contextWindow,
+      temperature,
     });
     res.json({ success: true });
   } catch (error) {

@@ -43,7 +43,10 @@ export interface AgentConfig {
   name: string;
   type: AgentType;
   modelConfig: ModelConfig;
-  promptTemplateId?: string;
+  temperature?: number;
+  rolePrompt?: string;
+  behaviorRules?: string;
+  capabilityBoundary?: string;
   skills?: string[];
   knowledgeFiles?: string[];
   status: AgentStatus;
@@ -63,8 +66,9 @@ export interface DomainAgentProfile {
   status: 'ONLINE' | 'BUSY' | 'OFFLINE';
   skills: string[];
   tools: string[];
-  description?: string;
-  constraints?: string;
+  rolePrompt?: string;
+  behaviorRules?: string;
+  capabilityBoundary?: string;
 }
 
 export interface DAGNode {

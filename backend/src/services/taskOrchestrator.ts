@@ -429,7 +429,9 @@ export class TaskOrchestrator extends EventEmitter {
       name: agent.name,
       type: agent.type,
       modelConfig,
-      promptTemplateId: agent.promptTemplateId,
+      rolePrompt: capabilities[0]?.rolePrompt || undefined,
+      behaviorRules: capabilities[0]?.behaviorRules || undefined,
+      capabilityBoundary: capabilities[0]?.capabilityBoundary || undefined,
       skills,
       tools,
     };

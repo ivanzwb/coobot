@@ -37,10 +37,13 @@ export interface Agent {
   type: 'LEADER' | 'DOMAIN';
   modelConfigId: string | null;
   modelConfig: ModelConfig | null;
-  promptTemplateId: string | null;
+  temperature: number | null;
   status: AgentStatus;
   createdAt: string;
   updatedAt: string;
+  rolePrompt?: string;
+  behaviorRules?: string;
+  capabilityBoundary?: string;
   capabilities?: {
     skills: string[];
     tools: string[];
@@ -57,6 +60,7 @@ export interface ModelConfig {
   baseUrl: string | null;
   apiKey: string | null;
   contextWindow: number | null;
+  temperature: number | null;
   status: 'ready' | 'loading' | 'error' | 'offline';
 }
 

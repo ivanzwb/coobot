@@ -12,17 +12,20 @@ export interface ModelConfigRecord {
   baseUrl: string | null;
   apiKey: string | null;
   contextWindow: number | null;
+  temperature: number | null;
   status: string | null;
   createdAt: Date | null;
   updatedAt: Date | null;
 }
 
 export interface ModelConfig {
+  name: string;
   provider: string;
   modelName: string;
   baseUrl?: string;
   apiKey?: string;
   contextWindow?: number;
+  temperature?: number;
 }
 
 export interface ModelHealth {
@@ -39,12 +42,13 @@ export class ModelHub {
     
     await db.insert(schema.modelConfigs).values({
       id,
-      name: config.modelName,
+      name: config.name,
       provider: config.provider,
       modelName: config.modelName,
       baseUrl: config.baseUrl || null,
       apiKey: config.apiKey || null,
       contextWindow: config.contextWindow || 4096,
+      temperature: config.temperature ?? null,
       status: 'offline',
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -58,6 +62,7 @@ export class ModelHub {
       baseUrl: config.baseUrl || null,
       apiKey: config.apiKey || null,
       contextWindow: config.contextWindow || 4096,
+      temperature: config.temperature ?? null,
       status: 'offline',
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -136,7 +141,7 @@ export class ModelHub {
       .where(eq(schema.modelConfigs.id, modelId));
   }
 
-  async updateModel(modelId: string, updates: { name?: string; provider?: string; modelName?: string; baseUrl?: string; apiKey?: string; contextWindow?: number }): Promise<void> {
+  async updateModel(modelId: string, updates: { name?: string; provider?: string; modelName?: string; baseUrl?: string; apiKey?: string; contextWindow?: number, temperature?: number }): Promise<void> {
     const models = await db.select()
       .from(schema.modelConfigs)
       .where(eq(schema.modelConfigs.id, modelId));
@@ -153,6 +158,7 @@ export class ModelHub {
         baseUrl: updates.baseUrl !== undefined ? updates.baseUrl : models[0].baseUrl,
         apiKey: updates.apiKey !== undefined ? updates.apiKey : models[0].apiKey,
         contextWindow: updates.contextWindow || models[0].contextWindow,
+        temperature: updates.temperature !== undefined ? updates.temperature : models[0].temperature,
         updatedAt: new Date(),
       })
       .where(eq(schema.modelConfigs.id, modelId));
@@ -164,11 +170,13 @@ export class ModelHub {
 
   buildModelConfig(modelConfigRecord: ModelConfigRecord): ModelConfig {
     return {
+      name: modelConfigRecord.name,
       provider: modelConfigRecord.provider,
       modelName: modelConfigRecord.modelName,
       baseUrl: modelConfigRecord.baseUrl || undefined,
       apiKey: modelConfigRecord.apiKey || undefined,
       contextWindow: modelConfigRecord.contextWindow || undefined,
+      temperature: modelConfigRecord.temperature || undefined,
     };
   }
 }

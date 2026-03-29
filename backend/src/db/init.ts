@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS model_configs (
   base_url TEXT,
   api_key TEXT,
   context_window INTEGER DEFAULT 4096,
+  temperature REAL,
   status TEXT DEFAULT 'offline',
   created_at INTEGER,
   updated_at INTEGER
@@ -24,7 +25,6 @@ CREATE TABLE IF NOT EXISTS agents (
   name TEXT NOT NULL,
   type TEXT NOT NULL,
   model_config_id TEXT REFERENCES model_configs(id),
-  prompt_template_id TEXT,
   temperature REAL,
   status TEXT DEFAULT 'IDLE',
   created_at INTEGER,
@@ -35,8 +35,9 @@ CREATE TABLE IF NOT EXISTS agent_capabilities (
   agent_id TEXT PRIMARY KEY REFERENCES agents(id),
   skills_json TEXT NOT NULL,
   tools_json TEXT NOT NULL,
-  description TEXT,
-  constraints TEXT,
+  role_prompt TEXT,
+  behavior_rules TEXT,
+  capability_boundary TEXT,
   last_heartbeat INTEGER,
   status TEXT DEFAULT 'OFFLINE',
   updated_at INTEGER
@@ -66,17 +67,6 @@ CREATE TABLE IF NOT EXISTS agent_skills (
   skill_id TEXT NOT NULL REFERENCES skills(id),
   config_json TEXT,
   PRIMARY KEY (agent_id, skill_id)
-);
-
-CREATE TABLE IF NOT EXISTS prompts (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  description TEXT,
-  content TEXT NOT NULL,
-  variables_json TEXT,
-  tags TEXT,
-  created_at INTEGER,
-  updated_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS agent_tool_permissions (

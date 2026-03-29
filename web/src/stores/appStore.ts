@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { Task, Agent, Model, Message, AgentMetrics, ResourceMetrics } from '../types';
-import { tasksApi, agentsApi, modelsApi, systemApi } from '../api';
+import { tasksApi, agentsApi, modelsApi, systemApi, type AgentCreateInput, type AgentUpdateInput } from '../api';
 
 interface AppState {
   tasks: Task[];
@@ -22,8 +22,8 @@ interface AppState {
   terminateTask: (id: string) => Promise<void>;
   selectTask: (task: Task | null) => void;
   selectAgent: (agent: Agent | null) => void;
-  createAgent: (data: Partial<Agent>) => Promise<Agent>;
-  updateAgent: (id: string, data: Partial<Agent>) => Promise<void>;
+  createAgent: (data: AgentCreateInput) => Promise<Agent>;
+  updateAgent: (id: string, data: AgentUpdateInput) => Promise<void>;
   deleteAgent: (id: string) => Promise<void>;
   setSidebarOpen: (open: boolean) => void;
   setCurrentView: (view: 'chat' | 'agents' | 'knowledge' | 'settings') => void;
@@ -117,7 +117,7 @@ export const useAppStore = create<AppState>((set) => ({
     set({ currentAgent: agent });
   },
 
-  createAgent: async (data: Partial<Agent>) => {
+  createAgent: async (data: AgentCreateInput) => {
     try {
       const response = await agentsApi.create(data);
       const agent = response.data;
@@ -129,12 +129,12 @@ export const useAppStore = create<AppState>((set) => ({
     }
   },
 
-  updateAgent: async (id: string, data: Partial<Agent>) => {
+  updateAgent: async (id: string, data: AgentUpdateInput) => {
     try {
-      await agentsApi.update(id, data);
+      const response = await agentsApi.update(id, data);
       set(state => ({
         agents: state.agents.map(a =>
-          a.id === id ? { ...a, ...data } : a
+          a.id === id ? { ...a, ...response.data } : a
         ),
       }));
     } catch (error) {

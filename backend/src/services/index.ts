@@ -12,7 +12,6 @@ export { toolHub, ToolHub } from './toolHub.js';
 export { auditService, AuditService } from './auditService.js';
 export { monitorService, MonitorService } from './monitorService.js';
 export { backupService, BackupService } from './backupService.js';
-export { promptTemplateService, PromptTemplateService } from './promptTemplateService.js';
 export { skillRegistry, SkillRegistry } from './skillRegistry.js';
 export { skillRuntimeManager, SkillRuntimeManager } from './skillRuntimeManager.js';
 export { contextAssemblyEngine, ContextAssemblyEngine } from './contextAssemblyEngine.js';
@@ -27,7 +26,7 @@ import { toolHub } from './toolHub.js';
 
 export async function initializeDatabase(): Promise<void> {
   const tables = [
-    'agents', 'modelConfigs', 'prompts', 'skills', 'agentSkills',
+    'agents', 'modelConfigs', 'skills', 'agentSkills',
     'agentCapabilities', 'agentToolPermissions', 'tasks', 'taskLogs',
     'knowledgeFiles', 'sessionMemory', 'longTermMemory', 'auditLogs',
     'scheduledJobs', 'jobExecutionLogs', 'permissionRequests'
@@ -67,8 +66,6 @@ export async function initializeDatabase(): Promise<void> {
       agentId: 'LEADER',
       skillsJson: JSON.stringify([]),
       toolsJson: JSON.stringify(defaultTools),
-      description: 'Leader Agent 默认能力',
-      constraints: '',
       status: 'ONLINE',
       lastHeartbeat: new Date(),
       updatedAt: new Date(),

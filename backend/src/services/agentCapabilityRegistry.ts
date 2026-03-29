@@ -15,8 +15,9 @@ export class AgentCapabilityRegistry {
         agentId: profile.agentId,
         skillsJson: JSON.stringify(profile.skills),
         toolsJson: JSON.stringify(profile.tools),
-        description: profile.description || '',
-        constraints: profile.constraints || '',
+        rolePrompt: profile.rolePrompt || '',
+        behaviorRules: profile.behaviorRules || '',
+        capabilityBoundary: profile.capabilityBoundary || '',
         lastHeartbeat: new Date(),
         status: 'ONLINE',
         updatedAt: new Date(),
@@ -26,8 +27,9 @@ export class AgentCapabilityRegistry {
         set: {
           skillsJson: JSON.stringify(profile.skills),
           toolsJson: JSON.stringify(profile.tools),
-          description: profile.description,
-          constraints: profile.constraints,
+          rolePrompt: profile.rolePrompt,
+          behaviorRules: profile.behaviorRules,
+          capabilityBoundary: profile.capabilityBoundary,
           status: 'ONLINE',
           lastHeartbeat: new Date(),
           updatedAt: new Date(),
@@ -75,8 +77,9 @@ export class AgentCapabilityRegistry {
         status: cap.status as 'ONLINE' | 'BUSY' | 'OFFLINE',
         skills,
         tools: JSON.parse(cap.toolsJson || '[]'),
-        description: cap.description || undefined,
-        constraints: cap.constraints || undefined,
+        rolePrompt: cap.rolePrompt || undefined,
+        behaviorRules: cap.behaviorRules || undefined,
+        capabilityBoundary: cap.capabilityBoundary || undefined,
       });
     }
 
@@ -117,8 +120,9 @@ export class AgentCapabilityRegistry {
         status: cap.status as 'ONLINE' | 'BUSY' | 'OFFLINE',
         skills: JSON.parse(cap.skillsJson || '[]'),
         tools: JSON.parse(cap.toolsJson || '[]'),
-        description: cap.description || undefined,
-        constraints: cap.constraints || undefined,
+        rolePrompt: cap.rolePrompt || undefined,
+        behaviorRules: cap.behaviorRules || undefined,
+        capabilityBoundary: cap.capabilityBoundary || undefined,
       });
     }
   }

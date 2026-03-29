@@ -11,7 +11,6 @@ const Sidebar: React.FC = () => {
     { key: '/', label: '对话', icon: '💬' },
     { key: '/agents', label: 'Agent', icon: '🤖' },
     { key: '/knowledge', label: '知识库', icon: '📚' },
-    { key: '/prompts', label: 'Prompt', icon: '📝' },
     { key: '/skills', label: 'Skills', icon: '🛠️' },
     { key: '/memory', label: '记忆', icon: '🧠' },
     { key: '/scheduler', label: '定时任务', icon: '⏰' },

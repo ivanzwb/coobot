@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db, schema } from '../db/index.js';
 import { eq, and } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { agentCapabilityRegistry, toolHub, knowledgeEngine } from '../services/index.js';
+import { agentCapabilityRegistry, toolHub, knowledgeEngine, logger } from '../services/index.js';
 
 const router = Router();
 
@@ -14,8 +14,9 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
       status: cap.status,
       skills: JSON.parse(cap.skillsJson || '[]'),
       tools: JSON.parse(cap.toolsJson || '[]'),
-      description: cap.description,
-      constraints: cap.constraints,
+      rolePrompt: cap.rolePrompt || null, 
+      behaviorRules: cap.behaviorRules || null,
+      capabilityBoundary: cap.capabilityBoundary || null,
     }));
     res.json(result);
   } catch (error) {
@@ -36,6 +37,9 @@ router.get('/', async (_req: Request, res: Response) => {
       const cap = capMap.get(agent.id);
       return {
         ...agent,
+        rolePrompt: cap?.rolePrompt || null,
+        behaviorRules: cap?.behaviorRules || null,
+        capabilityBoundary: cap?.capabilityBoundary || null,
         modelConfig: agent.modelConfigId ? configMap.get(agent.modelConfigId) : null,
         capabilities: cap ? {
           skills: JSON.parse(cap.skillsJson || '[]'),
@@ -57,7 +61,7 @@ router.post('/:id/knowledge/upload', async (req: Request, res: Response) => {
     const { file, overwriteVersion } = req.body;
     const knowledgeFile = await knowledgeEngine.ingestFile(
       file,
-      req.params.id,
+      req.params.id as string,
       overwriteVersion
     );
     res.status(201).json(knowledgeFile);
@@ -78,7 +82,7 @@ router.post('/:id/knowledge/upload', async (req: Request, res: Response) => {
 router.put('/:id/tools/permissions', async (req: Request, res: Response) => {
   try {
     const { toolName, policy } = req.body;
-    const agentId = req.params.id;
+    const agentId = req.params.id as string;
 
     if (!['DENY', 'ASK', 'ALLOW'].includes(policy)) {
       return res.status(400).json({ error: 'Invalid policy' });
@@ -122,7 +126,7 @@ router.get('/:id', async (req: Request, res: Response) => {
   try {
     const agents = await db.select()
       .from(schema.agents)
-      .where(eq(schema.agents.id, req.params.id));
+      .where(eq(schema.agents.id, req.params.id as string));
 
     if (agents.length === 0) {
       return res.status(404).json({ error: 'Agent not found' });
@@ -131,11 +135,11 @@ router.get('/:id', async (req: Request, res: Response) => {
     const agent = agents[0];
     const capabilities = await db.select()
       .from(schema.agentCapabilities)
-      .where(eq(schema.agentCapabilities.agentId, req.params.id));
+      .where(eq(schema.agentCapabilities.agentId, req.params.id as string));
 
     const skills = await db.select()
       .from(schema.agentSkills)
-      .where(eq(schema.agentSkills.agentId, req.params.id));
+      .where(eq(schema.agentSkills.agentId, req.params.id as string));
 
     let modelConfig = null;
     if (agent.modelConfigId) {
@@ -149,6 +153,9 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     res.json({
       ...agent,
+      rolePrompt: capabilities[0]?.rolePrompt || null,
+      behaviorRules: capabilities[0]?.behaviorRules || null,
+      capabilityBoundary: capabilities[0]?.capabilityBoundary || null,
       modelConfig,
       capabilities: capabilities[0] ? {
         skills: JSON.parse(capabilities[0].skillsJson || '[]'),
@@ -164,7 +171,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { name, type, modelConfigId, promptTemplateId, skills } = req.body;
+    const { name, type, modelConfigId, skills, temperature, rolePrompt, behaviorRules, capabilityBoundary } = req.body;
     
     const id = uuidv4();
     
@@ -173,7 +180,7 @@ router.post('/', async (req: Request, res: Response) => {
       name,
       type: type || 'DOMAIN',
       modelConfigId: modelConfigId || null,
-      promptTemplateId: promptTemplateId || null,
+      temperature: temperature || null,
       status: 'IDLE',
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -185,7 +192,9 @@ router.post('/', async (req: Request, res: Response) => {
       status: 'ONLINE',
       skills: skills || [],
       tools: toolHub.listTools().map(t => t.name),
-      description: '',
+      rolePrompt: rolePrompt || '',
+      behaviorRules: behaviorRules || '',
+      capabilityBoundary: capabilityBoundary || '',
     });
 
     const defaultTools = toolHub.listTools().map(t => t.name);
@@ -223,20 +232,39 @@ router.post('/', async (req: Request, res: Response) => {
 
 router.put('/:id', async (req: Request, res: Response) => {
   try {
-    const { name, modelConfigId, promptTemplateId } = req.body;
+    const { name, modelConfigId, temperature, rolePrompt, behaviorRules, capabilityBoundary } = req.body;
 
     await db.update(schema.agents)
       .set({
         name: name,
         modelConfigId: modelConfigId,
-        promptTemplateId: promptTemplateId,
+        temperature: temperature !== undefined ? temperature : undefined,
         updatedAt: new Date(),
       })
-      .where(eq(schema.agents.id, req.params.id));
+      .where(eq(schema.agents.id, req.params.id as string));
+
+    if (rolePrompt !== undefined || behaviorRules !== undefined || capabilityBoundary !== undefined) {
+      const existing = await db.select()
+        .from(schema.agentCapabilities)
+        .where(eq(schema.agentCapabilities.agentId, req.params.id as string));
+      
+      if (existing.length > 0) {
+        const updateData: Record<string, unknown> = { updatedAt: new Date() };
+        if (rolePrompt !== undefined) updateData.rolePrompt = rolePrompt;
+        if (behaviorRules !== undefined) updateData.behaviorRules = behaviorRules;
+        if (capabilityBoundary !== undefined) updateData.capabilityBoundary = capabilityBoundary;
+        
+        await db.update(schema.agentCapabilities)
+          .set(updateData)
+          .where(eq(schema.agentCapabilities.agentId, req.params.id as string));
+      } else {
+        logger.error('Agent', `Agent ${name} update failed, capabilities is missing, delete and recreate.`);
+      }
+    }
 
     const agents = await db.select()
       .from(schema.agents)
-      .where(eq(schema.agents.id, req.params.id));
+      .where(eq(schema.agents.id, req.params.id as string));
 
     if (agents.length === 0) {
       return res.status(404).json({ error: 'Agent not found' });
@@ -253,7 +281,17 @@ router.put('/:id', async (req: Request, res: Response) => {
       }
     }
 
-    res.json({ ...agent, modelConfig });
+    const capabilities = await db.select()
+      .from(schema.agentCapabilities)
+      .where(eq(schema.agentCapabilities.agentId, req.params.id as string));
+
+    res.json({ 
+      ...agent, 
+      modelConfig,
+      rolePrompt: capabilities[0].rolePrompt || '',
+      behaviorRules: capabilities[0].behaviorRules || '',
+      capabilityBoundary: capabilities[0].capabilityBoundary || '',
+    });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -262,16 +300,16 @@ router.put('/:id', async (req: Request, res: Response) => {
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
     await db.delete(schema.agentToolPermissions)
-      .where(eq(schema.agentToolPermissions.agentId, req.params.id));
+      .where(eq(schema.agentToolPermissions.agentId, req.params.id as string));
 
     await db.delete(schema.agentCapabilities)
-      .where(eq(schema.agentCapabilities.agentId, req.params.id));
+      .where(eq(schema.agentCapabilities.agentId, req.params.id as string));
 
     await db.delete(schema.agentSkills)
-      .where(eq(schema.agentSkills.agentId, req.params.id));
+      .where(eq(schema.agentSkills.agentId, req.params.id as string));
 
     await db.delete(schema.agents)
-      .where(eq(schema.agents.id, req.params.id));
+      .where(eq(schema.agents.id, req.params.id as string));
 
     res.json({ success: true });
   } catch (error) {
@@ -284,7 +322,7 @@ router.post('/:id/skills', async (req: Request, res: Response) => {
     const { skillId, config } = req.body;
 
     await db.insert(schema.agentSkills).values({
-      agentId: req.params.id,
+      agentId: req.params.id as string,
       skillId,
       configJson: config ? JSON.stringify(config) : null,
     }).onConflictDoNothing();
@@ -299,7 +337,7 @@ router.delete('/:id/skills/:skillId', async (req: Request, res: Response) => {
   try {
     await db.delete(schema.agentSkills)
       .where(
-        eq(schema.agentSkills.agentId, req.params.id)
+        eq(schema.agentSkills.agentId, req.params.id as string)
       );
 
     res.json({ success: true });

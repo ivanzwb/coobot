@@ -137,8 +137,9 @@ export class LeaderAgent extends EventEmitter {
     const agentListJson = JSON.stringify(availableAgents.map(a => ({
       id: a.agentId,
       name: a.name,
-      description: a.description,
-      constraints: a.constraints
+      rolePrompt: a.rolePrompt,
+      behaviorRules: a.behaviorRules,
+      capabilityBoundary: a.capabilityBoundary,
     })), null, 2);
 
     logger.debug('LeaderAgent', 'Sending agent list to LLM', { agentIds: availableAgents.map(a => a.agentId) });
@@ -208,10 +209,12 @@ export class LeaderAgent extends EventEmitter {
       const messages: { role: 'user' | 'assistant' | 'system'; content: string }[] = [{ role: 'user', content: prompt }];
       logger.debug('LeaderAgent', 'LLM input', { model: modelConfig.modelName, messages });
 
+      const effectiveTemperature = leaderAgent[0].temperature ?? modelConfig.temperature;
+
       const response = await client.chat.completions.create({
         model: modelConfig.modelName,
         messages: messages as ChatCompletionMessageParam[],
-        temperature: 0.3,
+        temperature: effectiveTemperature,
       });
 
       const result = response.choices[0]?.message?.content;

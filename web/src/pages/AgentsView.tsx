@@ -3,12 +3,6 @@ import { useAppStore } from '../stores/appStore';
 import { modelsApi, knowledgeApi } from '../api';
 import type { Model } from '../types';
 
-interface PromptTemplate {
-  id: string;
-  name: string;
-  description: string;
-}
-
 interface Skill {
   id: string;
   name: string;
@@ -31,21 +25,26 @@ const AgentsView: React.FC = () => {
   const [showToolsModal, setShowToolsModal] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<any>(null);
   const [newAgentName, setNewAgentName] = useState('');
+  const [newAgentTemperature, setNewAgentTemperature] = useState<number>(0.7);
+  const [newRolePrompt, setNewRolePrompt] = useState('');
+  const [newBehaviorRules, setNewBehaviorRules] = useState('');
+  const [newCapabilityBoundary, setNewCapabilityBoundary] = useState('');
   const [models, setModels] = useState<Model[]>([]);
-  const [prompts, setPrompts] = useState<PromptTemplate[]>([]);
   const [selectedModelId, setSelectedModelId] = useState('');
-  const [selectedPromptId, setSelectedPromptId] = useState('');
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [agentSkills, setAgentSkills] = useState<string[]>([]);
   const [knowledgeFiles, setKnowledgeFiles] = useState<KnowledgeFile[]>([]);
   const [toolPermissions, setToolPermissions] = useState<{toolName: string; description: string; policy: string}[]>([]);
+  const [editRolePrompt, setEditRolePrompt] = useState('');
+  const [editBehaviorRules, setEditBehaviorRules] = useState('');
+  const [editCapabilityBoundary, setEditCapabilityBoundary] = useState('');
+  const [editTemperature, setEditTemperature] = useState<number>(0.7);
 
   useEffect(() => {
     fetchAgents();
     loadModels();
     loadSkills();
-    loadPrompts();
   }, [fetchAgents]);
 
   const loadModels = async () => {
@@ -54,16 +53,6 @@ const AgentsView: React.FC = () => {
       setModels(response.data);
     } catch (error) {
       console.error('Failed to load models:', error);
-    }
-  };
-
-  const loadPrompts = async () => {
-    try {
-      const response = await fetch('/api/v1/prompts');
-      const data = await response.json();
-      setPrompts(data);
-    } catch (error) {
-      console.error('Failed to load prompts:', error);
     }
   };
 
@@ -135,7 +124,10 @@ const AgentsView: React.FC = () => {
         name: newAgentName,
         type: 'DOMAIN',
         modelConfigId: selectedModelId,
-        promptTemplateId: selectedPromptId || undefined,
+        temperature: newAgentTemperature,
+        rolePrompt: newRolePrompt,
+        behaviorRules: newBehaviorRules,
+        capabilityBoundary: newCapabilityBoundary,
       });
       
       if (selectedSkillIds.length > 0 && agent?.id) {
@@ -149,8 +141,11 @@ const AgentsView: React.FC = () => {
       }
       
       setNewAgentName('');
+      setNewAgentTemperature(0.7);
+      setNewRolePrompt('');
+      setNewBehaviorRules('');
+      setNewCapabilityBoundary('');
       setSelectedModelId('');
-      setSelectedPromptId('');
       setSelectedSkillIds([]);
       setShowModal(false);
       fetchAgents();
@@ -164,6 +159,10 @@ const AgentsView: React.FC = () => {
     setSelectedAgent(agent);
     const modelId = getCurrentModelId(agent);
     setSelectedModelId(modelId);
+    setEditRolePrompt(agent.rolePrompt || '');
+    setEditBehaviorRules(agent.behaviorRules || '');
+    setEditCapabilityBoundary(agent.capabilityBoundary || '');
+    setEditTemperature(agent.temperature || 0.7);
     loadAgentSkills(agent.id);
     loadKnowledgeFiles(agent.id);
     setShowConfigModal(true);
@@ -190,6 +189,10 @@ const AgentsView: React.FC = () => {
       await updateAgent(selectedAgent.id, {
         name: selectedAgent.name,
         modelConfigId: selectedModelId,
+        temperature: editTemperature,
+        rolePrompt: editRolePrompt,
+        behaviorRules: editBehaviorRules,
+        capabilityBoundary: editCapabilityBoundary,
       });
       await fetchAgents();
       setShowConfigModal(false);
@@ -310,7 +313,7 @@ const AgentsView: React.FC = () => {
               ) : (
                 <span className="tag" style={{ background: '#ff4d4f' }}>模型✗</span>
               )}
-              {agent.promptTemplateId ? (
+              {agent.rolePrompt || agent.behaviorRules || agent.capabilityBoundary ? (
                 <span className="tag" style={{ background: '#52c41a' }}>Prompt✓</span>
               ) : null}
               {agent.capabilities?.skills?.length ? (
@@ -348,6 +351,20 @@ const AgentsView: React.FC = () => {
             </div>
 
             <div className="form-group">
+              <label className="form-label">Temperature: {newAgentTemperature}</label>
+              <input
+                type="range"
+                min="0"
+                max="2"
+                step="0.1"
+                value={newAgentTemperature}
+                onChange={(e) => setNewAgentTemperature(parseFloat(e.target.value))}
+                style={{ width: '100%' }}
+              />
+              <div style={{ fontSize: 12, color: '#666' }}>较低的值产生更确定性的输出，较高的值产生更多样化的输出</div>
+            </div>
+
+            <div className="form-group">
               <label className="form-label">选择模型 *</label>
               <select
                 className="form-input"
@@ -364,19 +381,36 @@ const AgentsView: React.FC = () => {
             </div>
 
             <div className="form-group">
-              <label className="form-label">Prompt 模板（可选）</label>
-              <select
+              <label className="form-label">角色定位（Prompt）</label>
+              <textarea
                 className="form-input"
-                value={selectedPromptId}
-                onChange={(e) => setSelectedPromptId(e.target.value)}
-              >
-                <option value="">不使用模板</option>
-                {prompts.map(prompt => (
-                  <option key={prompt.id} value={prompt.id}>
-                    {prompt.name}
-                  </option>
-                ))}
-              </select>
+                value={newRolePrompt}
+                onChange={(e) => setNewRolePrompt(e.target.value)}
+                placeholder="定义 Agent 的角色定位，例如：你是一位专业的股票投资顾问"
+                rows={3}
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">行为规范</label>
+              <textarea
+                className="form-input"
+                value={newBehaviorRules}
+                onChange={(e) => setNewBehaviorRules(e.target.value)}
+                placeholder="定义 Agent 的行为规范，例如：1. 提供投资建议时必须说明风险 2. 不提供具体的买卖时机建议"
+                rows={3}
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">能力边界</label>
+              <textarea
+                className="form-input"
+                value={newCapabilityBoundary}
+                onChange={(e) => setNewCapabilityBoundary(e.target.value)}
+                placeholder="定义 Agent 的能力边界，例如：不能提供实时的股价数据，不能执行金融交易"
+                rows={3}
+              />
             </div>
 
             <div className="form-group">
@@ -436,6 +470,49 @@ const AgentsView: React.FC = () => {
                 value={selectedAgent.name}
                 onChange={(e) => setSelectedAgent({ ...selectedAgent, name: e.target.value })}
               />
+            </div>
+            <div className="form-group">
+              <label className="form-label">角色定位（Prompt）</label>
+              <textarea
+                className="form-input"
+                value={editRolePrompt}
+                onChange={(e) => setEditRolePrompt(e.target.value)}
+                placeholder="定义 Agent 的角色定位"
+                rows={3}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">行为规范</label>
+              <textarea
+                className="form-input"
+                value={editBehaviorRules}
+                onChange={(e) => setEditBehaviorRules(e.target.value)}
+                placeholder="定义 Agent 的行为规范"
+                rows={3}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">能力边界</label>
+              <textarea
+                className="form-input"
+                value={editCapabilityBoundary}
+                onChange={(e) => setEditCapabilityBoundary(e.target.value)}
+                placeholder="定义 Agent 的能力边界"
+                rows={3}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Temperature: {editTemperature}</label>
+              <input
+                type="range"
+                min="0"
+                max="2"
+                step="0.1"
+                value={editTemperature}
+                onChange={(e) => setEditTemperature(parseFloat(e.target.value))}
+                style={{ width: '100%' }}
+              />
+              <div style={{ fontSize: 12, color: '#666' }}>较低的值产生更确定性的输出，较高的值产生更多样化的输出</div>
             </div>
             <div className="form-group">
               <label className="form-label">选择模型</label>

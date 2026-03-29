@@ -33,7 +33,10 @@ export interface AgentConfig {
   name: string;
   type: 'LEADER' | 'DOMAIN';
   modelConfig: DbModelConfig;
-  promptTemplateId?: string;
+  temperature?: number;
+  rolePrompt?: string;
+  behaviorRules?: string;
+  capabilityBoundary?: string;
   skills: string[];
   tools: string[];
 }
@@ -134,16 +137,20 @@ export class AgentRuntime extends EventEmitter {
   }
 
   private async buildSystemPrompt(agentConfig: AgentConfig): Promise<string> {
-    let basePrompt = `你是一个专业的 AI 助手。请始终使用与用户输入相同的语言进行回复。`;
+    const parts: string[] = [];
 
-    if (agentConfig.promptTemplateId) {
-      const promptRecords = await db.select()
-        .from(schema.prompts)
-        .where(eq(schema.prompts.id, agentConfig.promptTemplateId));
-      
-      if (promptRecords.length > 0 && promptRecords[0].content) {
-        basePrompt = promptRecords[0].content;
-      }
+    if (agentConfig.rolePrompt) {
+      parts.push(agentConfig.rolePrompt);
+    } else {
+      parts.push(`你是一个专业的 AI 助手。请始终使用与用户输入相同的语言进行回复。`);
+    }
+
+    if (agentConfig.behaviorRules) {
+      parts.push(`\n行为规范：\n${agentConfig.behaviorRules}`);
+    }
+
+    if (agentConfig.capabilityBoundary) {
+      parts.push(`\n能力边界：\n${agentConfig.capabilityBoundary}`);
     }
 
     logger.info('AgentRuntime', 'Building system prompt', {
@@ -158,6 +165,8 @@ export class AgentRuntime extends EventEmitter {
     const skillsText = agentConfig.skills.length > 0
       ? `\n技能：${agentConfig.skills.join(', ')}`
       : '';
+
+    let basePrompt = parts.join('\n\n');
 
     if (basePrompt.includes('${tools}')) {
       basePrompt = basePrompt.replace('${tools}', toolsText);
@@ -202,7 +211,7 @@ export class AgentRuntime extends EventEmitter {
     while (stepIndex < this.maxReActSteps) {
       logger.debug('AgentRuntime', 'ReAct step', { taskId: task.id, stepIndex, type: 'THOUGHT' });
 
-      const thought = await this.callModel(currentContext, agentConfig.modelConfig);
+      const thought = await this.callModel(currentContext, agentConfig.modelConfig, agentConfig.temperature);
 
       const thoughtStep: ReActStep = {
         stepIndex: stepIndex++,
@@ -253,7 +262,7 @@ export class AgentRuntime extends EventEmitter {
     return steps;
   }
 
-  private async callModel(prompt: string, modelConfig: DbModelConfig): Promise<string> {
+  private async callModel(prompt: string, modelConfig: DbModelConfig, temperature?: number): Promise<string> {
     try {
       if (!modelConfig || !modelConfig.modelName) {
         return 'Model not configured. Please configure a model first.';
@@ -268,10 +277,12 @@ export class AgentRuntime extends EventEmitter {
       const messages = [{ role: 'user' as const, content: prompt }];
       logger.debug('AgentRuntime', 'LLM input', { model: modelConfig.modelName, messages });
 
+      const effectiveTemperature = temperature ?? modelConfig.temperature;
+
       const response = await client.chat.completions.create({
         model: modelConfig.modelName,
         messages,
-        temperature: 0.3,
+        temperature: effectiveTemperature,
       });
 
       const output = response.choices[0]?.message?.content || '';

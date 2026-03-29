@@ -12,7 +12,7 @@ const ChatView: React.FC = () => {
   const [isClarificationSubmitting, setIsClarificationSubmitting] = useState(false);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const { createTask, tasks, fetchTasks } = useAppStore();
+  const { tasks, fetchTasks } = useAppStore();
   useWebSocket();
   const { lastMessage } = useTaskEvents();
 

@@ -21,7 +21,6 @@ export type NewAgent = typeof schema.agents.$inferInsert;
 export type Task = typeof schema.tasks.$inferSelect;
 export type NewTask = typeof schema.tasks.$inferInsert;
 export type Skill = typeof schema.skills.$inferSelect;
-export type Prompt = typeof schema.prompts.$inferSelect;
 export type KnowledgeFile = typeof schema.knowledgeFiles.$inferSelect;
 export type SessionMessage = typeof schema.sessionMemory.$inferSelect;
 export type LongTermMemory = typeof schema.longTermMemory.$inferSelect;
