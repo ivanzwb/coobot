@@ -64,6 +64,10 @@ export class AgentCapabilityRegistry {
       const cap = capabilitiesMap.get(agent.id);
       if (!cap) continue;
 
+      if (cap.status !== 'ONLINE') {
+        continue;
+      }
+
       const skills = JSON.parse(cap.skillsJson || '[]');
       
       if (filters?.skills) {

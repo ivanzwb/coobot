@@ -5,7 +5,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';
 import cron from 'node-cron';
 import routes from './routes/index.js';
-import { configManager, initializeDatabase, schedulerService, agentCapabilityRegistry, taskOrchestrator, vectorStore, monitorService, memoryEngine, logger, backupService } from './services/index.js';
+import { configManager, initializeDatabase, schedulerService, agentCapabilityRegistry, taskOrchestrator, vectorStore, monitorService, memoryEngine, logger, backupService, skillRegistry } from './services/index.js';
 import { eventBus } from './services/eventBus.js';
 
 dotenv.config();
@@ -30,6 +30,7 @@ async function bootstrap() {
     await initializeDatabase();
     await vectorStore.initialize();
     await agentCapabilityRegistry.loadFromDatabase();
+    await skillRegistry.registerAllSkillTools();
 
     schedulerService.start();
     monitorService.startMonitoring();

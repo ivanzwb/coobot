@@ -36,7 +36,7 @@ export class KnowledgeEngine {
 
   async ingestFile(file: { path: string; name: string }, agentId: string, overwriteVersion?: string): Promise<KnowledgeFile> {
     const conflict = await this.checkVersionConflict(file.name, agentId);
-    
+
     if (conflict && !overwriteVersion) {
       throw new Error('VERSION_CONFLICT:' + JSON.stringify({
         existingFileId: conflict.existingFile.id,
@@ -51,16 +51,16 @@ export class KnowledgeEngine {
     const fileId = uuidv4();
     const workspacePath = configManager.getWorkspacePath();
     const knowledgeDir = path.join(workspacePath, 'knowledge', agentId);
-    
+
     if (!fs.existsSync(knowledgeDir)) {
       fs.mkdirSync(knowledgeDir, { recursive: true });
     }
 
     const ext = path.extname(file.name).toLowerCase();
     const destPath = path.join(knowledgeDir, `${fileId}${ext}`);
-    
+
     fs.copyFileSync(file.path, destPath);
-    
+
     const fileHash = this.calculateFileHash(destPath);
     const vectorPartition = `vec_${agentId}`;
 
@@ -99,7 +99,7 @@ export class KnowledgeEngine {
     try {
       const content = await this.parseFile(file.filePath, file.fileName);
       const textChunks = this.chunkText(content);
-      
+
       const vectorChunks: VectorChunk[] = textChunks.map((text, index) => ({
         id: uuidv4(),
         text,
@@ -127,7 +127,7 @@ export class KnowledgeEngine {
 
   private async parseFile(filePath: string, fileName: string): Promise<string> {
     const ext = path.extname(fileName).toLowerCase();
-    
+
     switch (ext) {
       case '.txt':
       case '.md':
@@ -166,14 +166,14 @@ export class KnowledgeEngine {
   private chunkText(text: string, chunkSize: number = 800, overlap: number = 50): string[] {
     const chunks: string[] = [];
     const chars = text.split('');
-    
+
     for (let i = 0; i < chars.length; i += chunkSize - overlap) {
       const chunk = chars.slice(i, i + chunkSize).join('');
       if (chunk.trim()) {
         chunks.push(chunk);
       }
     }
-    
+
     return chunks;
   }
 
@@ -187,9 +187,9 @@ export class KnowledgeEngine {
     try {
       const agent = await db.select().from(schema.agents).where(eq(schema.agents.id, agentId));
       const agentName = agent[0]?.name || 'Unknown';
-      
+
       const vectorResults = await vectorStore.search(agentId, query, topK);
-      
+
       return vectorResults.map(r => ({
         content: r.text,
         source: `依据：${agentName} 知识库 -> ${r.metadata.fileName}${r.metadata.page ? `, 第 ${r.metadata.page} 页` : ''}, 第 ${(r.metadata.chunkIndex || 0) + 1} 条`,
@@ -203,7 +203,7 @@ export class KnowledgeEngine {
       }));
     } catch (error) {
       console.error('Vector search failed, falling back to keyword search:', error);
-      
+
       const files = await db.select()
         .from(schema.knowledgeFiles)
         .where(
@@ -214,21 +214,21 @@ export class KnowledgeEngine {
         );
 
       const results: { content: string; source: string; score: number }[] = [];
-      
+
       for (const file of files) {
         try {
           const content = await this.parseFile(file.filePath, file.fileName);
-          
+
           const lowerContent = content.toLowerCase();
           const lowerQuery = query.toLowerCase();
           const matchCount = (lowerContent.match(new RegExp(lowerQuery.split(' ').join('|'), 'g')) || []).length;
-          
+
           if (matchCount > 0) {
             const sentences = content.split(/[.!?]\s+/);
-            const relevantSentences = sentences.filter(s => 
+            const relevantSentences = sentences.filter(s =>
               s.toLowerCase().includes(lowerQuery)
             ).slice(0, 3);
-            
+
             results.push({
               content: relevantSentences.join('. '),
               source: file.fileName,
@@ -257,13 +257,13 @@ export class KnowledgeEngine {
 
     if (file.length > 0) {
       const agentId = file[0].agentId;
-      
+
       await vectorStore.deleteFileChunks(agentId, fileId);
-      
+
       if (deletePhysical && fs.existsSync(file[0].filePath)) {
         fs.unlinkSync(file[0].filePath);
       }
-      
+
       await db.delete(schema.knowledgeFiles)
         .where(eq(schema.knowledgeFiles.id, fileId));
     }

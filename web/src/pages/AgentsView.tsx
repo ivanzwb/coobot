@@ -129,7 +129,7 @@ const AgentsView: React.FC = () => {
         behaviorRules: newBehaviorRules,
         capabilityBoundary: newCapabilityBoundary,
       });
-      
+
       if (selectedSkillIds.length > 0 && agent?.id) {
         for (const skillId of selectedSkillIds) {
           await fetch(`/api/v1/agents/${agent.id}/skills`, {
@@ -139,7 +139,7 @@ const AgentsView: React.FC = () => {
           });
         }
       }
-      
+
       setNewAgentName('');
       setNewAgentTemperature(0.7);
       setNewRolePrompt('');
@@ -230,12 +230,15 @@ const AgentsView: React.FC = () => {
     }
   };
 
-  const getStatusClass = (status: string) => {
-    switch (status) {
-      case 'IDLE': return 'idle';
-      case 'RUNNING': return 'running';
-      case 'BUSY_WITH_QUEUE': return 'busy';
-      default: return '';
+  const handleToggleAgent = async (agent: any, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const isEnabled = agent.capabilities?.status === 'ONLINE';
+    const endpoint = isEnabled ? 'disable' : 'enable';
+    try {
+      await fetch(`/api/v1/agents/${agent.id}/${endpoint}`, { method: 'POST' });
+      fetchAgents();
+    } catch (error) {
+      console.error(`Failed to ${endpoint} agent:`, error);
     }
   };
 
@@ -263,10 +266,18 @@ const AgentsView: React.FC = () => {
               <span className="agent-name">{agent.name}</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 <span className="agent-status">
-                  <span className={`status-dot ${getStatusClass(agent.status)}`}></span>
-                  {agent.status === 'IDLE' ? '空闲' :
-                   agent.status === 'RUNNING' ? '运行中' : '忙碌'}
+                  <span className={`status-dot ${agent.capabilities?.status === 'ONLINE' ? 'idle' : ''}`}></span>
+                  {agent.capabilities?.status === 'ONLINE' ? '在线' : '离线'}
                 </span>
+                {agent.type !== 'LEADER' && (
+                  <button
+                    className={`btn btn-sm ${agent.capabilities?.status === 'ONLINE' ? 'btn-warning' : 'btn-success'}`}
+                    onClick={(e) => handleToggleAgent(agent, e)}
+                    style={{ padding: '4px 8px', fontSize: 12 }}
+                  >
+                    {agent.capabilities?.status === 'ONLINE' ? '禁用' : '启用'}
+                  </button>
+                )}
                 <button
                   className="btn btn-sm"
                   onClick={(e) => handleEditAgent(agent, e)}
@@ -337,7 +348,7 @@ const AgentsView: React.FC = () => {
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 600 }}>
             <h2 className="modal-title">创建新 Agent</h2>
-            
+
             <div className="form-group">
               <label className="form-label">Agent 名称 *</label>
               <input
@@ -646,9 +657,9 @@ const AgentsView: React.FC = () => {
             <h2 className="modal-title">工具权限 - {selectedAgent.name}</h2>
             <div style={{ maxHeight: 400, overflowY: 'auto' }}>
               {toolPermissions.map(tool => (
-                <div key={tool.toolName} style={{ 
-                  display: 'flex', 
-                  alignItems: 'center', 
+                <div key={tool.toolName} style={{
+                  display: 'flex',
+                  alignItems: 'center',
                   justifyContent: 'space-between',
                   padding: '10px 0',
                   borderBottom: '1px solid #eee'

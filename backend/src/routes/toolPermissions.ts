@@ -8,7 +8,7 @@ router.get('/:agentId', async (req: Request, res: Response) => {
   try {
     const permissions = await db.select()
       .from(schema.agentToolPermissions)
-      .where(eq(schema.agentToolPermissions.agentId, req.params.agentId));
+      .where(eq(schema.agentToolPermissions.agentId, req.params.agentId as string));
 
     const defaultTools = [
       { toolName: 'read_file', policy: 'ASK', description: '读取本地文件' },
@@ -21,6 +21,35 @@ router.get('/:agentId', async (req: Request, res: Response) => {
       { toolName: 'system_info', policy: 'ALLOW', description: '获取系统信息' },
     ];
 
+    let skillTools: { toolName: string; policy: string; description: string }[] = [];
+    const agentSkillsList = await db.select()
+      .from(schema.agentSkills)
+      .where(eq(schema.agentSkills.agentId, req.params.agentId as string));
+    
+    for (const agentSkill of agentSkillsList) {
+      const skillData = await db.select()
+        .from(schema.skills)
+        .where(eq(schema.skills.id, agentSkill.skillId));
+      
+      if (skillData.length > 0) {
+        const skill = skillData[0];
+        try {
+          const toolsManifest = JSON.parse(skill.toolManifestJson || '[]');
+          for (const tool of toolsManifest) {
+            const skillToolName = `skill:${skill.name}:${tool.name}`;
+            const customPerm = permissions.find(p => p.toolName === skillToolName);
+            skillTools.push({
+              toolName: skillToolName,
+              policy: customPerm?.policy || 'ASK',
+              description: `[Skill: ${skill.name}] ${tool.description || tool.name}`,
+            });
+          }
+        } catch (e) {
+          console.error('Failed to parse toolManifestJson:', e);
+        }
+      }
+    }
+
     const result = defaultTools.map(tool => {
       const customPerm = permissions.find(p => p.toolName === tool.toolName);
       return {
@@ -30,7 +59,7 @@ router.get('/:agentId', async (req: Request, res: Response) => {
       };
     });
 
-    res.json(result);
+    res.json([...result, ...skillTools]);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -49,7 +78,7 @@ router.put('/:agentId', async (req: Request, res: Response) => {
       .from(schema.agentToolPermissions)
       .where(
         and(
-          eq(schema.agentToolPermissions.agentId, agentId),
+          eq(schema.agentToolPermissions.agentId, agentId as string),
           eq(schema.agentToolPermissions.toolName, toolName)
         )
       );
@@ -59,35 +88,19 @@ router.put('/:agentId', async (req: Request, res: Response) => {
         .set({ policy, updatedAt: new Date() })
         .where(
           and(
-            eq(schema.agentToolPermissions.agentId, agentId),
+            eq(schema.agentToolPermissions.agentId, agentId as string),
             eq(schema.agentToolPermissions.toolName, toolName)
           )
         );
     } else {
       await db.insert(schema.agentToolPermissions)
         .values({
-          agentId,
+          agentId: agentId as string,
           toolName,
           policy,
           updatedAt: new Date(),
         });
     }
-
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: String(error) });
-  }
-});
-
-router.delete('/:agentId/:toolName', async (req: Request, res: Response) => {
-  try {
-    await db.delete(schema.agentToolPermissions)
-      .where(
-        and(
-          eq(schema.agentToolPermissions.agentId, req.params.agentId),
-          eq(schema.agentToolPermissions.toolName, req.params.toolName)
-        )
-      );
 
     res.json({ success: true });
   } catch (error) {

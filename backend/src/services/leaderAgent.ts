@@ -134,17 +134,29 @@ export class LeaderAgent extends EventEmitter {
     const context = await memoryEngine.getActiveHistory(5);
     const historyText = context.map(h => `${h.role}: ${h.content}`).join('\n');
 
+    const leaderCapability = await db.select()
+      .from(schema.agentCapabilities)
+      .where(eq(schema.agentCapabilities.agentId, this.leaderAgentId));
+
+    const roleDescription = leaderCapability[0]?.rolePrompt
+      || 'You are the core decision-maker for task planning and scheduling. Your responsibility is to analyze user requirements, plan task flows, and coordinate domain agents to complete tasks.';
+    const behaviorGuidelines = leaderCapability[0]?.behaviorRules
+      || '1. Understand user requirements and analyze task intent\n2. Break down complex tasks into executable subtasks\n3. Assign tasks reasonably based on agent capabilities\n4. Ensure correct task dependencies\n5. Ask for clarification from user when necessary';
+    const constraints = leaderCapability[0]?.capabilityBoundary
+      || '1. Only dispatch registered agents, do not execute specific tasks directly\n2. Task assignment must use valid Agent IDs\n3. Request clarification when confidence is below 0.7\n4. Clearly inform the user when tasks cannot be assigned';
+
     const agentListJson = JSON.stringify(availableAgents.map(a => ({
       id: a.agentId,
       name: a.name,
-      rolePrompt: a.rolePrompt,
-      behaviorRules: a.behaviorRules,
-      capabilityBoundary: a.capabilityBoundary,
+      rolePrompt: a.rolePrompt
     })), null, 2);
 
     logger.debug('LeaderAgent', 'Sending agent list to LLM', { agentIds: availableAgents.map(a => a.agentId) });
 
     const prompt = taskAnalysisPrompt({
+      roleDescription,
+      behaviorGuidelines,
+      constraints,
       agentListJson,
       historyText,
       userInput,
@@ -207,7 +219,7 @@ export class LeaderAgent extends EventEmitter {
 
       logger.info('LeaderAgent', 'Calling OpenAI API');
       const messages: { role: 'user' | 'assistant' | 'system'; content: string }[] = [{ role: 'user', content: prompt }];
-      logger.debug('LeaderAgent', 'LLM input', { model: modelConfig.modelName, messages });
+      logger.debug('LeaderAgent', 'LLM input', { model: modelConfig.modelName, messages: messages.map(m => JSON.stringify(m)).join(',\n') });
 
       const effectiveTemperature = leaderAgent[0].temperature ?? modelConfig.temperature;
 
@@ -250,34 +262,14 @@ export class LeaderAgent extends EventEmitter {
         continue;
       }
 
-      const hasSkills = node.requiredSkills.every(s => agent.skills.includes(s));
-      if (!hasSkills) {
-        const missing = node.requiredSkills.find(s => !agent.skills.includes(s));
-        unassignableTasks.push({
-          nodeId: node.id,
-          reason: `Agent '${agent.name}' lacks required skill`,
-          missingSkill: missing || 'N/A',
-        });
-        continue;
-      }
-
       validDag.push(node);
     }
 
     return { dag: validDag, unassignableTasks };
   }
 
-  private generateClarificationQuestions(issues: UnassignableIssue[]): string[] {
-    return issues.map(issue => {
-      if (issue.reason.includes('not found')) {
-        return `The task requires an agent that doesn't exist. ${issue.reason}`;
-      }
-      return `Task "${issue.nodeId}" requires skill "${issue.missingSkill}" but no available agent has it.`;
-    });
-  }
-
   private async watchSubTasksCompletion(parentTaskId: string): Promise<void> {
-    const { root, children } = await taskOrchestrator.getTaskTree(parentTaskId);
+    const { children } = await taskOrchestrator.getTaskTree(parentTaskId);
 
     const pendingTasks = children.filter(
       c => c.status !== 'COMPLETED' && c.status !== 'TERMINATED' && c.status !== 'EXCEPTION'

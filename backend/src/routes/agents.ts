@@ -320,12 +320,46 @@ router.delete('/:id', async (req: Request, res: Response) => {
 router.post('/:id/skills', async (req: Request, res: Response) => {
   try {
     const { skillId, config } = req.body;
+    const agentId = req.params.id as string;
 
     await db.insert(schema.agentSkills).values({
-      agentId: req.params.id as string,
+      agentId,
       skillId,
       configJson: config ? JSON.stringify(config) : null,
     }).onConflictDoNothing();
+
+    const skillData = await db.select()
+      .from(schema.skills)
+      .where(eq(schema.skills.id, skillId));
+    
+    if (skillData.length > 0) {
+      const skill = skillData[0];
+      try {
+        const toolsManifest = JSON.parse(skill.toolManifestJson || '[]');
+        for (const tool of toolsManifest) {
+          const toolName = `skill:${skill.name}:${tool.name}`;
+          const existingPerm = await db.select()
+            .from(schema.agentToolPermissions)
+            .where(
+              and(
+                eq(schema.agentToolPermissions.agentId, agentId),
+                eq(schema.agentToolPermissions.toolName, toolName)
+              )
+            );
+          
+          if (existingPerm.length === 0) {
+            await db.insert(schema.agentToolPermissions).values({
+              agentId,
+              toolName,
+              policy: 'ASK',
+              updatedAt: new Date(),
+            });
+          }
+        }
+      } catch (e) {
+        console.error('Failed to parse toolManifestJson:', e);
+      }
+    }
 
     res.json({ success: true });
   } catch (error) {
@@ -335,12 +369,93 @@ router.post('/:id/skills', async (req: Request, res: Response) => {
 
 router.delete('/:id/skills/:skillId', async (req: Request, res: Response) => {
   try {
+    const agentId = req.params.id as string;
+    const skillId = req.params.skillId;
+
     await db.delete(schema.agentSkills)
       .where(
-        eq(schema.agentSkills.agentId, req.params.id as string)
+        and(
+          eq(schema.agentSkills.agentId, agentId),
+          eq(schema.agentSkills.skillId, skillId as string)
+        )
       );
 
+    const skillData = await db.select()
+      .from(schema.skills)
+      .where(eq(schema.skills.id, skillId as string));
+    
+    if (skillData.length > 0) {
+      const skill = skillData[0];
+      try {
+        const toolsManifest = JSON.parse(skill.toolManifestJson || '[]');
+        for (const tool of toolsManifest) {
+          const toolName = `skill:${skill.name}:${tool.name}`;
+          await db.delete(schema.agentToolPermissions)
+            .where(
+              and(
+                eq(schema.agentToolPermissions.agentId, agentId),
+                eq(schema.agentToolPermissions.toolName, toolName)
+              )
+            );
+        }
+      } catch (e) {
+        console.error('Failed to parse toolManifestJson:', e);
+      }
+    }
+
     res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+router.post('/:id/enable', async (req: Request, res: Response) => {
+  try {
+    const agentId = req.params.id as string;
+
+    const existing = await db.select()
+      .from(schema.agentCapabilities)
+      .where(eq(schema.agentCapabilities.agentId, agentId));
+
+    if (existing.length > 0) {
+      await db.update(schema.agentCapabilities)
+        .set({ status: 'ONLINE', updatedAt: new Date() })
+        .where(eq(schema.agentCapabilities.agentId, agentId));
+    } else {
+      return res.status(404).json({ error: 'Agent capabilities not found' });
+    }
+
+    await db.update(schema.agents)
+      .set({ status: 'IDLE', updatedAt: new Date() })
+      .where(eq(schema.agents.id, agentId));
+
+    res.json({ success: true, enabled: true });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+router.post('/:id/disable', async (req: Request, res: Response) => {
+  try {
+    const agentId = req.params.id as string;
+
+    const existing = await db.select()
+      .from(schema.agentCapabilities)
+      .where(eq(schema.agentCapabilities.agentId, agentId));
+
+    if (existing.length > 0) {
+      await db.update(schema.agentCapabilities)
+        .set({ status: 'OFFLINE', updatedAt: new Date() })
+        .where(eq(schema.agentCapabilities.agentId, agentId));
+    } else {
+      return res.status(404).json({ error: 'Agent capabilities not found' });
+    }
+
+    await db.update(schema.agents)
+      .set({ status: 'OFFLINE', updatedAt: new Date() })
+      .where(eq(schema.agents.id, agentId));
+
+    res.json({ success: true, enabled: false });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }

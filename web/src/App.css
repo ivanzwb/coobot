@@ -369,6 +369,26 @@ body {
   color: white;
 }
 
+.btn-success {
+  color: #52c41a;
+  border-color: #52c41a;
+}
+
+.btn-success:hover {
+  background: #52c41a;
+  color: white;
+}
+
+.btn-warning {
+  color: #faad14;
+  border-color: #faad14;
+}
+
+.btn-warning:hover {
+  background: #faad14;
+  color: white;
+}
+
 .modal-overlay {
   position: fixed;
   top: 0;

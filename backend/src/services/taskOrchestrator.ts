@@ -9,6 +9,7 @@ import { eventBus } from './eventBus.js';
 import { leaderAgent } from './leaderAgent.js';
 import { logger } from './logger.js';
 import { memoryEngine } from './memoryEngine.js';
+import { skillRegistry } from './skillRegistry.js';
 
 export class TaskOrchestrator extends EventEmitter {
   private taskQueue: Map<string, Task> = new Map();
@@ -45,7 +46,7 @@ export class TaskOrchestrator extends EventEmitter {
 
     const taskId = this.leaderTaskQueue.shift()!;
     this.isLeaderTaskRunning = true;
-    
+
     logger.info('TaskOrchestrator', 'Processing leader task from queue', { taskId, remaining: this.leaderTaskQueue.length });
 
     try {
@@ -401,27 +402,38 @@ export class TaskOrchestrator extends EventEmitter {
       }
     }
 
+    const agentSkillRelations = await db.select()
+      .from(schema.agentSkills)
+      .where(eq(schema.agentSkills.agentId, agent.id));
+
+    const agentSkills: { id: string; name: string; description: string; tools: { name: string; description: string }[] }[] = [];
+
+    if (agentSkillRelations.length > 0) {
+      const skillIds = agentSkillRelations.map(r => r.skillId);
+      const installedSkills = await skillRegistry.listInstalled();
+      const matchedSkills = installedSkills.filter(s => skillIds.includes(s.id));
+
+      for (const skill of matchedSkills) {
+        agentSkills.push({
+          id: skill.id,
+          name: skill.name,
+          description: skill.description,
+          tools: skill.tools.map(t => ({ name: t.name, description: t.description }))
+        });
+      }
+    }
+
     const capabilities = await db.select()
       .from(schema.agentCapabilities)
       .where(eq(schema.agentCapabilities.agentId, agent.id));
 
-    let skills: string[] = [];
-    let tools: string[] = [];
-
-    if (capabilities.length > 0) {
-      try {
-        skills = JSON.parse(capabilities[0].skillsJson || '[]');
-        tools = JSON.parse(capabilities[0].toolsJson || '[]');
-      } catch (e) {
-        logger.warn('TaskOrchestrator', 'Failed to parse capabilities JSON', { agentId: agent.id, e });
-      }
-    }
+    const agentTools = JSON.parse(capabilities[0].toolsJson || '[]');
 
     logger.info('TaskOrchestrator', 'buildAgentConfig', {
       agentId: agent.id,
       capabilitiesFound: capabilities.length,
-      tools,
-      skills
+      tools: agentTools,
+      skills: agentSkills
     });
 
     return {
@@ -432,8 +444,8 @@ export class TaskOrchestrator extends EventEmitter {
       rolePrompt: capabilities[0]?.rolePrompt || undefined,
       behaviorRules: capabilities[0]?.behaviorRules || undefined,
       capabilityBoundary: capabilities[0]?.capabilityBoundary || undefined,
-      skills,
-      tools,
+      skills: agentSkills,
+      tools: agentTools,
     };
   }
 

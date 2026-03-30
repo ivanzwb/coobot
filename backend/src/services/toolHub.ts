@@ -4,6 +4,7 @@ import { exec } from 'child_process';
 import { securitySandbox, PermissionDeniedError } from './securitySandbox';
 import { configManager } from './configManager';
 import { createReadStream } from 'fs';
+import { logger } from './logger.js';
 
 export interface ToolDescriptor {
   name: string,
@@ -424,8 +425,9 @@ export class ToolHub {
     this.register(new SystemInfoTool());
   }
 
-  register(tool: BaseTool): void {
-    this.tools.set(tool.name, tool);
+  register(tool: BaseTool, customName?: string): void {
+    const name = customName || tool.name;
+    this.tools.set(name, tool);
   }
 
   unregisterTool(name: string): boolean {
@@ -463,26 +465,37 @@ export class ToolHub {
   }
 
   async execute(agentId: string, toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+    logger.info('ToolHub', 'execute start', { agentId, toolName, args: JSON.stringify(args) });
+
     const permResult = await securitySandbox.intercept(agentId, toolName, args);
+    logger.debug('ToolHub', 'permission check', { toolName, policy: permResult.policy });
 
     if (permResult.policy === 'DENY') {
+      logger.warn('ToolHub', 'tool denied', { toolName });
       throw new PermissionDeniedError(`Tool ${toolName} is denied`);
     }
 
     if (permResult.policy === 'ASK' && !permResult.requiresUserConfirmation) {
+      logger.warn('ToolHub', 'user confirmation required', { toolName });
       return { success: false, error: 'User confirmation required' };
     }
 
     const tool = this.tools.get(toolName);
     if (!tool) {
+      logger.error('ToolHub', 'tool not found', { toolName, availableTools: Array.from(this.tools.keys()) });
       return { success: false, error: `Tool ${toolName} not found` };
     }
 
     if (!securitySandbox.validateToolParams(toolName, args)) {
+      logger.warn('ToolHub', 'invalid params', { toolName });
       return { success: false, error: 'Invalid tool parameters' };
     }
 
-    return await tool.execute(args);
+    logger.info('ToolHub', 'executing tool', { toolName, toolDescription: tool.description });
+    const result = await tool.execute(args);
+    logger.info('ToolHub', 'execute complete', { toolName, success: result.success, output: result.output?.slice(0, 200) });
+
+    return result;
   }
 }
 

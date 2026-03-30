@@ -28,6 +28,13 @@ export interface AgentExecutionContext {
   memoryContext: string;
 }
 
+export interface AgentSkill {
+  id: string;
+  name: string;
+  description: string;
+  tools: { name: string; description: string }[];
+}
+
 export interface AgentConfig {
   id: string;
   name: string;
@@ -37,7 +44,7 @@ export interface AgentConfig {
   rolePrompt?: string;
   behaviorRules?: string;
   capabilityBoundary?: string;
-  skills: string[];
+  skills: AgentSkill[];
   tools: string[];
 }
 
@@ -142,37 +149,29 @@ export class AgentRuntime extends EventEmitter {
     if (agentConfig.rolePrompt) {
       parts.push(agentConfig.rolePrompt);
     } else {
-      parts.push(`你是一个专业的 AI 助手。请始终使用与用户输入相同的语言进行回复。`);
+      parts.push(`You are a professional AI assistant.`);
     }
 
     if (agentConfig.behaviorRules) {
-      parts.push(`\n行为规范：\n${agentConfig.behaviorRules}`);
+      parts.push(`\nBehavior Guidelines:\n${agentConfig.behaviorRules}`);
     }
+    parts.push(`\nAlways respond in the same language as the user's input.`);
 
     if (agentConfig.capabilityBoundary) {
-      parts.push(`\n能力边界：\n${agentConfig.capabilityBoundary}`);
+      parts.push(`\nCapability Boundaries:\n${agentConfig.capabilityBoundary}`);
     }
 
     logger.info('AgentRuntime', 'Building system prompt', {
       agentId: agentConfig.id,
       tools: agentConfig.tools,
-      skills: agentConfig.skills
+      skills: agentConfig.skills.map(s => s.name)
     })
-    const toolsText = agentConfig.tools.length > 0
-      ? `\n可用工具：\n${agentConfig.tools.map(t => `- ${t}`).join('\n')}`
-      : '';
 
     const skillsText = agentConfig.skills.length > 0
-      ? `\n技能：${agentConfig.skills.join(', ')}`
+      ? `\nAvailable Skills (lazy load - use skill name to load when needed):\n${agentConfig.skills.map(s => `- ${s.name}: ${s.description}`).join('\n')}`
       : '';
 
     let basePrompt = parts.join('\n\n');
-
-    if (basePrompt.includes('${tools}')) {
-      basePrompt = basePrompt.replace('${tools}', toolsText);
-    } else if (toolsText) {
-      basePrompt += toolsText;
-    }
 
     if (basePrompt.includes('${skills}')) {
       basePrompt = basePrompt.replace('${skills}', skillsText);
@@ -198,20 +197,34 @@ export class AgentRuntime extends EventEmitter {
       payload = { content: task.inputPayload };
     }
     const userRequest = payload.content || payload.description || '';
-    let currentContext = `${context.systemPrompt}\n\nUser request: ${userRequest}\n`;
+
+    const messages: { role: string; content: string; name?: string }[] = [];
+
+    messages.push({ role: 'system', content: context.systemPrompt });
+    messages.push({ role: 'user', content: `User request: ${userRequest}` });
 
     if (context.knowledgeContext) {
-      currentContext += `\n\nRelevant knowledge:\n${context.knowledgeContext}\n`;
+      messages.push({ role: 'system', content: `Relevant knowledge:\n${context.knowledgeContext}` });
     }
 
     if (context.memoryContext) {
-      currentContext += `\n\nUser preferences and context:\n${context.memoryContext}\n`;
+      messages.push({ role: 'system', content: `User preferences and context:\n${context.memoryContext}` });
     }
 
-    while (stepIndex < this.maxReActSteps) {
-      logger.debug('AgentRuntime', 'ReAct step', { taskId: task.id, stepIndex, type: 'THOUGHT' });
+    const loadedSkills: Set<string> = new Set();
+    const loadedToolNames: string[] = [];
 
-      const thought = await this.callModel(currentContext, agentConfig.modelConfig, agentConfig.temperature);
+    while (stepIndex < this.maxReActSteps) {
+      logger.debug('AgentRuntime', 'ReAct step', { taskId: task.id, stepIndex, type: 'THOUGHT', tools: loadedToolNames });
+
+      const response = await this.callModelWithMessages(
+        messages,
+        agentConfig.modelConfig,
+        agentConfig.temperature,
+        loadedToolNames
+      );
+
+      const thought = response.content;
 
       const thoughtStep: ReActStep = {
         stepIndex: stepIndex++,
@@ -221,26 +234,64 @@ export class AgentRuntime extends EventEmitter {
       steps.push(thoughtStep);
       await this.logStep(task.id, thoughtStep);
 
-      const action = this.parseAction(thought);
+      if (response.toolCall) {
+        logger.info('AgentRuntime', 'Executing tool call', { taskId: task.id, toolName: response.toolCall.name, args: JSON.stringify(response.toolCall.args) });
+        
+        const action = response.toolCall.name;
+        const actionInput = response.toolCall.args;
 
-      if (!action) {
+        const toolResult = await this.executeTool(agentConfig.id, action, actionInput);
+        logger.info('AgentRuntime', 'Tool executed', { taskId: task.id, toolName: action, result: toolResult.slice(0, 200) });
+
+        messages.push({ role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: action, arguments: JSON.stringify(actionInput) } }] } as any);
+        messages.push({ role: 'tool', tool_call_id: 'call_1', content: toolResult } as any);
+        continue;
+      }
+
+      const parsed = this.parseReAct(thought);
+      if (!parsed) {
         logger.debug('AgentRuntime', 'ReAct completed (no action)', { taskId: task.id, totalSteps: stepIndex });
         break;
+      }
+
+      const { action, actionInput } = parsed;
+
+      if (action === 'FINISH' || action === 'final_answer') {
+        logger.debug('AgentRuntime', 'Task completed', { taskId: task.id, finalAnswer: actionInput });
+        break;
+      }
+
+      const needsReload = this.checkSkillReload(agentConfig.skills, action, loadedSkills);
+      if (needsReload) {
+        const skillDef = this.buildSkillDefinition(needsReload);
+        messages.push({ role: 'system', content: `【Skill Definition】: ${skillDef}` });
+        loadedSkills.add(needsReload.id);
+
+        const skillToolNames = needsReload.tools.map(t => `skill:${needsReload.name}:${t.name}`);
+        loadedToolNames.push(...skillToolNames);
+
+        logger.info('AgentRuntime', 'Skill lazy loaded', {
+          taskId: task.id,
+          skillName: needsReload.name,
+          tools: skillToolNames.join(', ')
+        });
+
+        continue;
       }
 
       const actionStep: ReActStep = {
         stepIndex: stepIndex++,
         stepType: 'ACTION',
-        content: `Executing: ${action.name}`,
-        toolName: action.name,
-        toolArgs: action.args,
+        content: `Executing: ${action}(${JSON.stringify(actionInput)})`,
+        toolName: action,
+        toolArgs: actionInput,
       };
       steps.push(actionStep);
       await this.logStep(task.id, actionStep);
 
-      logger.debug('AgentRuntime', 'ReAct step', { taskId: task.id, stepIndex, type: 'ACTION', toolName: action.name });
+      logger.debug('AgentRuntime', 'ReAct step', { taskId: task.id, stepIndex, type: 'ACTION', toolName: action });
 
-      const observation = await this.executeTool(agentConfig.id, action.name, action.args);
+      const observation = await this.executeTool(agentConfig.id, action, actionInput);
 
       const observationStep: ReActStep = {
         stepIndex: stepIndex++,
@@ -250,7 +301,8 @@ export class AgentRuntime extends EventEmitter {
       steps.push(observationStep);
       await this.logStep(task.id, observationStep);
 
-      currentContext += `\n\nThought: ${thought}\nAction: ${action.name}(${JSON.stringify(action.args)})\nObservation: ${observation}\n`;
+      messages.push({ role: 'assistant', content: thought });
+      messages.push({ role: 'tool', name: action, content: observation });
 
       await taskOrchestrator.updateTaskHeartbeat(task.id);
 
@@ -262,10 +314,59 @@ export class AgentRuntime extends EventEmitter {
     return steps;
   }
 
-  private async callModel(prompt: string, modelConfig: DbModelConfig, temperature?: number): Promise<string> {
+  private parseReAct(response: string): { action: string; actionInput: Record<string, unknown> } | null {
+    const finalMatch = response.match(/(?:FINISH|Final Answer)[:\s]*(.+)/is);
+    if (finalMatch) {
+      return { action: 'FINISH', actionInput: { result: finalMatch[1].trim() } };
+    }
+
+    const actionMatch = response.match(/Action:\s*(\w+)\s*\(([^)]*)\)/is);
+    if (!actionMatch) {
+      return null;
+    }
+
+    const action = actionMatch[1].trim();
+    const argsStr = actionMatch[2].trim();
+
+    let actionInput: Record<string, unknown> = {};
+    if (argsStr) {
+      try {
+        actionInput = JSON.parse(`{${argsStr}}`);
+      } catch {
+        actionInput = { input: argsStr };
+      }
+    }
+
+    return { action, actionInput };
+  }
+
+  private checkSkillReload(
+    skills: AgentSkill[],
+    action: string,
+    loadedSkills: Set<string>
+  ): AgentSkill | null {
+    const skillToolMatch = action.match(/^skill:([^:]+):(.+)$/);
+    if (skillToolMatch) {
+      const skillName = skillToolMatch[1];
+      return skills.find(s => s.name === skillName && !loadedSkills.has(s.name)) || null;
+    }
+    return null;
+  }
+
+  private buildSkillDefinition(skill: AgentSkill): string {
+    const toolDefs = skill.tools.map(t => `- ${t.name}: ${t.description}`).join('\n');
+    return `Skill: ${skill.name}\nDescription: ${skill.description}\nTools:\n${toolDefs}`;
+  }
+
+  private async callModelWithMessages(
+    messages: { role: string; content: string; name?: string }[],
+    modelConfig: DbModelConfig,
+    temperature?: number,
+    toolNames: string[] = []
+  ): Promise<{ content: string; toolCall?: { name: string; args: Record<string, unknown> } }> {
     try {
       if (!modelConfig || !modelConfig.modelName) {
-        return 'Model not configured. Please configure a model first.';
+        return { content: 'Model not configured. Please configure a model first.' };
       }
 
       const client = new OpenAI({
@@ -274,46 +375,70 @@ export class AgentRuntime extends EventEmitter {
         timeout: 60000,
       });
 
-      const messages = [{ role: 'user' as const, content: prompt }];
-      logger.debug('AgentRuntime', 'LLM input', { model: modelConfig.modelName, messages });
+      logger.debug('AgentRuntime', 'LLM input', { model: modelConfig.modelName, messages: messages.map(m => JSON.stringify(m)).join(',\n') });
 
       const effectiveTemperature = temperature ?? modelConfig.temperature;
 
-      const response = await client.chat.completions.create({
-        model: modelConfig.modelName,
-        messages,
-        temperature: effectiveTemperature,
+      const allTools = toolHub.listTools();
+      for (const toolName of allTools) {
+        logger.info('AgentRuntime', 'toolName', { toolName: toolName.name });
+      }
+
+      const toolsParam = allTools.length > 0 ? allTools.map(t => t.jsonSchema as any) : undefined;
+      logger.debug('AgentRuntime', 'LLM tools', { 
+        model: modelConfig.modelName, 
+        toolsCount: allTools.length,
+        toolsParam: toolsParam ? JSON.stringify(toolsParam) : 'undefined',
       });
 
-      const output = response.choices[0]?.message?.content || '';
-      logger.debug('AgentRuntime', 'LLM output', { model: modelConfig.modelName, output });
+      const chatOptions: any = {
+        model: modelConfig.modelName,
+        messages: messages as any,
+        temperature: effectiveTemperature,
+      };
+      
+      if (toolsParam) {
+        chatOptions.tools = toolsParam;
+        chatOptions.tool_choice = 'auto';
+      }
+      
+      const response = await client.chat.completions.create(chatOptions);
 
-      return output;
+      const message = response.choices[0]?.message;
+      const finishReason = response.choices[0]?.finish_reason;
+      logger.debug('AgentRuntime', 'response info', { model: modelConfig.modelName, finishReason, hasToolCalls: !!message?.tool_calls });
+      
+      let output = message?.content || '';
+      const hasToolCalls = message?.tool_calls && message.tool_calls.length > 0;
+      logger.debug('AgentRuntime', 'LLM output', { model: modelConfig.modelName, output, hasToolCalls, toolCallCount: message?.tool_calls?.length || 0 });
+
+      if (!output && !hasToolCalls && toolsParam) {
+        logger.info('AgentRuntime', 'empty response with tools, retrying without tools', { model: modelConfig.modelName });
+        const retryResponse = await client.chat.completions.create({
+          model: modelConfig.modelName,
+          messages: messages as any,
+          temperature: effectiveTemperature,
+        });
+        const retryMessage = retryResponse.choices[0]?.message;
+        output = retryMessage?.content || '';
+        logger.info('AgentRuntime', 'retry response', { model: modelConfig.modelName, output: output.slice(0, 200) });
+      }
+
+      if (message?.tool_calls && message.tool_calls.length > 0) {
+        const toolCall = message.tool_calls[0] as any;
+        return {
+          content: output,
+          toolCall: {
+            name: toolCall.function.name,
+            args: JSON.parse(toolCall.function.arguments || '{}'),
+          },
+        };
+      }
+
+      return { content: output };
     } catch (error) {
       console.error('Model call failed:', error);
-      return `Error calling model: ${error instanceof Error ? error.message : String(error)}`;
-    }
-  }
-
-  private parseAction(thought: string): { name: string; args: Record<string, unknown> } | null {
-    const actionMatch = thought.match(/Action:\s*(\w+)\(([^)]+)\)/i);
-
-    if (!actionMatch) {
-      const finalMatch = thought.match(/Final Answer:?\s*(.+)/i);
-      if (finalMatch) {
-        return null;
-      }
-      return { name: 'finish', args: { result: thought } };
-    }
-
-    const toolName = actionMatch[1].toLowerCase();
-    const argsStr = actionMatch[2];
-
-    try {
-      const args = argsStr ? JSON.parse(`{${argsStr}}`) : {};
-      return { name: toolName, args };
-    } catch {
-      return { name: toolName, args: { input: argsStr } };
+      return { content: `Error calling model: ${error instanceof Error ? error.message : String(error)}` };
     }
   }
 

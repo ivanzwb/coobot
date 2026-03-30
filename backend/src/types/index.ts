@@ -1,4 +1,4 @@
-export type TaskStatus = 
+export type TaskStatus =
   | 'WAITING_FOR_LEADER'
   | 'CLARIFICATION_PENDING'
   | 'PARSING'
@@ -75,7 +75,6 @@ export interface DAGNode {
   id: string;
   description: string;
   assignedAgentId: string;
-  requiredSkills: string[];
   dependencies: string[];
   inputSources?: string[];
 }
