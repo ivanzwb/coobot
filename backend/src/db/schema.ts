@@ -22,19 +22,13 @@ export const agents = sqliteTable('agents', {
   modelConfigId: text('model_config_id').references(() => modelConfigs.id),
   temperature: real('temperature'),
   status: text('status').default('IDLE'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
-  updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
-});
-
-export const agentCapabilities = sqliteTable('agent_capabilities', {
-  agentId: text('agent_id').primaryKey().references(() => agents.id),
-  skillsJson: text('skills_json').notNull(),
-  toolsJson: text('tools_json').notNull(),
   rolePrompt: text('role_prompt'),
   behaviorRules: text('behavior_rules'),
   capabilityBoundary: text('capability_boundary'),
-  lastHeartbeat: integer('last_heartbeat', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
-  status: text('status').default('OFFLINE'),
+  lastCapabilityHeartbeat: integer('last_capability_heartbeat', { mode: 'timestamp' }),
+  /** Scheduling / availability: ONLINE | BUSY | OFFLINE (distinct from agents.status task queue state). */
+  capabilityStatus: text('capability_status').default('OFFLINE'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
 });
 

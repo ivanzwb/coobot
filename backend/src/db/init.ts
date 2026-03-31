@@ -27,19 +27,12 @@ CREATE TABLE IF NOT EXISTS agents (
   model_config_id TEXT REFERENCES model_configs(id),
   temperature REAL,
   status TEXT DEFAULT 'IDLE',
-  created_at INTEGER,
-  updated_at INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS agent_capabilities (
-  agent_id TEXT PRIMARY KEY REFERENCES agents(id),
-  skills_json TEXT NOT NULL,
-  tools_json TEXT NOT NULL,
   role_prompt TEXT,
   behavior_rules TEXT,
   capability_boundary TEXT,
-  last_heartbeat INTEGER,
-  status TEXT DEFAULT 'OFFLINE',
+  last_capability_heartbeat INTEGER,
+  capability_status TEXT DEFAULT 'OFFLINE',
+  created_at INTEGER,
   updated_at INTEGER
 );
 

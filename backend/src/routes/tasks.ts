@@ -1,9 +1,36 @@
 import { Router, Request, Response } from 'express';
-import { taskOrchestrator, agentCapabilityRegistry } from '../services/index.js';
+import { taskOrchestrator, agentCapabilityRegistry, memoryEngine } from '../services/index.js';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 
 const router = Router();
+
+/** Express `req.params.id` is typed as `string | string[]`; route `/:id` is always a single string. */
+function taskIdParam(req: Request): string {
+  const id = req.params.id;
+  return Array.isArray(id) ? (id[0] ?? '') : (id ?? '');
+}
+
+/** 澄清回复写入 `clarificationReply`，避免 `content` 覆盖用户原始请求。 */
+function mergeClarificationIntoPayload(
+  existing: Record<string, unknown>,
+  clarificationData?: Record<string, unknown>
+): Record<string, unknown> {
+  if (!clarificationData) return existing;
+  const out: Record<string, unknown> = { ...existing };
+  const reply =
+    clarificationData.clarificationReply ??
+    clarificationData.message ??
+    clarificationData.content;
+  if (reply !== undefined && reply !== null && String(reply).trim() !== '') {
+    out.clarificationReply = String(reply).trim();
+  }
+  for (const [k, v] of Object.entries(clarificationData)) {
+    if (k === 'clarificationReply' || k === 'message' || k === 'content') continue;
+    out[k] = v;
+  }
+  return out;
+}
 
 router.post('/', async (req: Request, res: Response) => {
   try {
@@ -22,7 +49,7 @@ router.post('/', async (req: Request, res: Response) => {
 
 router.get('/:id', async (req: Request, res: Response) => {
   try {
-    const task = await taskOrchestrator.getTask(req.params.id);
+    const task = await taskOrchestrator.getTask(taskIdParam(req));
 
     if (!task) {
       return res.status(404).json({ error: 'Task not found' });
@@ -36,7 +63,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 
 router.get('/:id/tree', async (req: Request, res: Response) => {
   try {
-    const tree = await taskOrchestrator.getTaskTree(req.params.id);
+    const tree = await taskOrchestrator.getTaskTree(taskIdParam(req));
     res.json(tree);
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -45,7 +72,7 @@ router.get('/:id/tree', async (req: Request, res: Response) => {
 
 router.post('/:id/terminate', async (req: Request, res: Response) => {
   try {
-    await taskOrchestrator.terminateTask(req.params.id);
+    await taskOrchestrator.terminateTask(taskIdParam(req));
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -55,16 +82,34 @@ router.post('/:id/terminate', async (req: Request, res: Response) => {
 router.post('/:id/clarify', async (req: Request, res: Response) => {
   try {
     const { clarificationData } = req.body;
-    const task = await taskOrchestrator.getTask(req.params.id);
+    const id = taskIdParam(req);
+    const task = await taskOrchestrator.getTask(id);
 
     if (!task) {
       return res.status(404).json({ error: 'Task not found' });
     }
 
-    let updatedPayload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
-    if (clarificationData) {
-      updatedPayload = { ...updatedPayload, ...clarificationData };
+    if (task.status !== 'CLARIFICATION_PENDING') {
+      return res.status(400).json({ error: 'TASK_INVALID_STATUS' });
     }
+
+    const replyText =
+      clarificationData &&
+      (clarificationData.clarificationReply ??
+        clarificationData.message ??
+        clarificationData.content);
+    if (
+      replyText === undefined ||
+      replyText === null ||
+      String(replyText).trim() === ''
+    ) {
+      return res.status(400).json({ error: 'CLARIFICATION_PAYLOAD_INVALID' });
+    }
+
+    let updatedPayload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
+    updatedPayload = mergeClarificationIntoPayload(updatedPayload, clarificationData);
+
+    await memoryEngine.appendMessage('user', String(replyText).trim(), [], id);
 
     const payloadJson = JSON.stringify(updatedPayload);
     await db.update(schema.tasks)
@@ -72,12 +117,12 @@ router.post('/:id/clarify', async (req: Request, res: Response) => {
         inputPayload: payloadJson,
         updatedAt: new Date(),
       })
-      .where(eq(schema.tasks.id, req.params.id));
+      .where(eq(schema.tasks.id, id));
 
-    taskOrchestrator.patchTaskInputPayload(req.params.id, payloadJson);
+    taskOrchestrator.patchTaskInputPayload(id, payloadJson);
 
-    await taskOrchestrator.updateTaskStatus(req.params.id, 'PARSING');
-    await taskOrchestrator.enqueueLeaderTask(req.params.id);
+    await taskOrchestrator.updateTaskStatus(id, 'PARSING');
+    await taskOrchestrator.enqueueLeaderTask(id);
 
     res.json({ success: true });
   } catch (error) {
@@ -88,7 +133,8 @@ router.post('/:id/clarify', async (req: Request, res: Response) => {
 router.post('/:id/retry-after-clarification', async (req: Request, res: Response) => {
   try {
     const { clarificationData, newAgentConfigured } = req.body;
-    const task = await taskOrchestrator.getTask(req.params.id);
+    const id = taskIdParam(req);
+    const task = await taskOrchestrator.getTask(id);
 
     if (!task) {
       return res.status(404).json({ error: 'TASK_NOT_FOUND' });
@@ -99,8 +145,15 @@ router.post('/:id/retry-after-clarification', async (req: Request, res: Response
     }
 
     let updatedPayload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
-    if (clarificationData) {
-      updatedPayload = { ...updatedPayload, ...clarificationData };
+    updatedPayload = mergeClarificationIntoPayload(updatedPayload, clarificationData);
+
+    const replyText =
+      clarificationData &&
+      (clarificationData.clarificationReply ??
+        clarificationData.message ??
+        clarificationData.content);
+    if (replyText !== undefined && replyText !== null && String(replyText).trim() !== '') {
+      await memoryEngine.appendMessage('user', String(replyText).trim(), [], id);
     }
 
     const payloadJson = JSON.stringify(updatedPayload);
@@ -109,19 +162,19 @@ router.post('/:id/retry-after-clarification', async (req: Request, res: Response
         inputPayload: payloadJson,
         updatedAt: new Date(),
       })
-      .where(eq(schema.tasks.id, req.params.id));
+      .where(eq(schema.tasks.id, id));
 
-    taskOrchestrator.patchTaskInputPayload(req.params.id, payloadJson);
+    taskOrchestrator.patchTaskInputPayload(id, payloadJson);
 
     if (newAgentConfigured) {
       await agentCapabilityRegistry.loadFromDatabase();
     }
 
-    await taskOrchestrator.updateTaskStatus(req.params.id, 'PARSING');
-    await taskOrchestrator.enqueueLeaderTask(req.params.id);
+    await taskOrchestrator.updateTaskStatus(id, 'PARSING');
+    await taskOrchestrator.enqueueLeaderTask(id);
 
     res.json({
-      taskId: req.params.id,
+      taskId: id,
       status: 'PARSING',
       success: true
     });

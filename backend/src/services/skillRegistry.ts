@@ -3,11 +3,19 @@ import * as path from 'path';
 import { db, schema } from '../db';
 import { eq } from 'drizzle-orm';
 import { configManager } from './configManager';
-import { toolHub, BaseTool, ToolResult } from './toolHub';
-import { ScannedTool, skillRuntimeManager } from './skillRuntimeManager';
+import { toolHub, BaseTool, ToolResult, isSkillToolName } from './toolHub';
+import { skillRuntimeManager } from './skillRuntimeManager';
+import {
+  type SkillToolInvoke,
+  isValidInvokeShape,
+  posixEntry,
+  validateManifestInvokes,
+  validateInvokesMatchRuntime,
+} from './skillToolInvoke.js';
 import { OpenAI } from 'openai/client';
 import { modelHub } from './modelHub';
 import { logger } from './logger.js';
+import { normalizeSkillToolLogicalName, skillToolHubKey } from './skillToolNames.js';
 
 export interface SkillMeta {
   id: string;
@@ -24,6 +32,11 @@ export interface SkillTool {
   name: string;
   description: string;
   parameters?: Record<string, unknown>;
+  /**
+   * Managed-runtime binding only (not shown to the model as a separate field).
+   * Legacy DB rows may omit this; it is filled via `normalizeManifestTools` at load time.
+   */
+  invoke?: SkillToolInvoke;
 }
 
 export interface SkillInstallResult {
@@ -39,6 +52,7 @@ export interface SkillPreview {
   version?: string;
   author?: string;
   runtimeLanguage?: string;
+  /** Resolved tool manifest from `extractToolManifest` (also written to `skill-tools.json` when preview materializes). */
   tools: SkillTool[];
 }
 
@@ -133,7 +147,171 @@ function validateRuntimeConsistency(
   }
 }
 
-function findSkillRoot(extractDir: string): string | null {
+const AUTHOR_TOOL_MANIFEST = 'skill-tools.json';
+
+export { normalizeSkillToolLogicalName } from './skillToolNames.js';
+
+function defaultScriptExt(runtimeLanguage: string | null | undefined): '.js' | '.py' {
+  return runtimeLanguage === 'python' ? '.py' : '.js';
+}
+
+function listScriptRelPaths(skillDir: string, ext: '.js' | '.py'): string[] {
+  const scriptsDir = path.join(skillDir, 'scripts');
+  if (!fs.existsSync(scriptsDir)) return [];
+  return fs
+    .readdirSync(scriptsDir)
+    .filter((f) => f.endsWith(ext))
+    .map((f) => `scripts/${f}`);
+}
+
+function normalizeManifestTools(tools: SkillTool[], runtimeLanguage?: string | null): SkillTool[] {
+  const ext = defaultScriptExt(runtimeLanguage ?? undefined);
+  return tools.map((t) => {
+    const logicalName = normalizeSkillToolLogicalName(typeof t.name === 'string' ? t.name : '');
+    const t0 = logicalName === t.name ? t : { ...t, name: logicalName };
+    if (t0.invoke && isValidInvokeShape(t0.invoke)) {
+      const inv = t0.invoke;
+      return {
+        ...t0,
+        invoke:
+          inv.kind === 'script'
+            ? { kind: 'script', entry: posixEntry(inv.entry) }
+            : {
+                kind: 'cli_dispatch',
+                entry: posixEntry(inv.entry),
+                subcommand: inv.subcommand,
+              },
+      };
+    }
+    if (!logicalName) return t0;
+    return {
+      ...t0,
+      invoke: { kind: 'script', entry: `scripts/${logicalName}${ext}` },
+    };
+  });
+}
+
+function parseAuthorToolManifest(skillDir: string): SkillTool[] | null {
+  const p = path.join(skillDir, AUTHOR_TOOL_MANIFEST);
+  if (!fs.existsSync(p)) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(p, 'utf-8'));
+  } catch {
+    throw new Error(`${AUTHOR_TOOL_MANIFEST}: invalid JSON`);
+  }
+  if (!raw || typeof raw !== 'object' || !('tools' in raw)) {
+    throw new Error(`${AUTHOR_TOOL_MANIFEST}: missing "tools" array`);
+  }
+  const tools = (raw as { tools: unknown }).tools;
+  if (!Array.isArray(tools)) {
+    throw new Error(`${AUTHOR_TOOL_MANIFEST}: "tools" must be an array`);
+  }
+  const out: SkillTool[] = [];
+  for (const row of tools) {
+    if (!row || typeof row !== 'object') continue;
+    const r = row as Record<string, unknown>;
+    const name = normalizeSkillToolLogicalName(typeof r.name === 'string' ? r.name : '');
+    const description = typeof r.description === 'string' ? r.description : '';
+    if (!name || !description) {
+      throw new Error(`${AUTHOR_TOOL_MANIFEST}: each tool needs non-empty name and description`);
+    }
+    if (!r.invoke || !isValidInvokeShape(r.invoke)) {
+      throw new Error(`${AUTHOR_TOOL_MANIFEST}: tool "${name}" needs valid invoke (script | cli_dispatch)`);
+    }
+    const inv = r.invoke as SkillToolInvoke;
+    const parameters =
+      r.parameters && typeof r.parameters === 'object' && !Array.isArray(r.parameters)
+        ? (r.parameters as Record<string, unknown>)
+        : undefined;
+    out.push({
+      name,
+      description,
+      parameters,
+      invoke:
+        inv.kind === 'script'
+          ? { kind: 'script', entry: posixEntry(inv.entry) }
+          : {
+              kind: 'cli_dispatch',
+              entry: posixEntry(inv.entry),
+              subcommand: inv.subcommand,
+            },
+    });
+  }
+  return out;
+}
+
+/** Persist resolved manifest so install can re-run `extractToolManifest` from disk only (no duplicate LLM). */
+function writeSkillToolsJson(skillRoot: string, tools: SkillTool[]): void {
+  for (const t of tools) {
+    if (!t.invoke || !isValidInvokeShape(t.invoke)) {
+      throw new Error(`Cannot write skill-tools.json: tool "${t.name}" has no valid invoke`);
+    }
+  }
+  const payload = {
+    tools: tools.map((t) => {
+      const row: Record<string, unknown> = {
+        name: t.name,
+        description: t.description,
+        invoke: t.invoke,
+      };
+      if (t.parameters && Object.keys(t.parameters).length > 0) {
+        row.parameters = t.parameters;
+      }
+      return row;
+    }),
+  };
+  fs.writeFileSync(
+    path.join(skillRoot, AUTHOR_TOOL_MANIFEST),
+    JSON.stringify(payload, null, 2),
+    'utf-8'
+  );
+}
+
+function coerceLlmTools(raw: unknown[]): SkillTool[] {
+  const out: SkillTool[] = [];
+  for (const row of raw) {
+    if (!row || typeof row !== 'object') continue;
+    const r = row as Record<string, unknown>;
+    const name = normalizeSkillToolLogicalName(typeof r.name === 'string' ? r.name : '');
+    const description = typeof r.description === 'string' ? r.description.trim() : '';
+    if (!name || !description) continue;
+    const invokeRaw = r.invoke;
+    if (!isValidInvokeShape(invokeRaw)) continue;
+    const entry = posixEntry(invokeRaw.entry);
+    const invoke: SkillToolInvoke =
+      invokeRaw.kind === 'script'
+        ? { kind: 'script', entry }
+        : { kind: 'cli_dispatch', entry, subcommand: invokeRaw.subcommand };
+    const parameters =
+      r.parameters && typeof r.parameters === 'object' && !Array.isArray(r.parameters)
+        ? (r.parameters as Record<string, unknown>)
+        : undefined;
+    out.push({ name, description, parameters, invoke });
+  }
+  return out;
+}
+
+function validateLlmInvokesAgainstAllowlist(tools: SkillTool[], allowedEntries: string[]): void {
+  if (allowedEntries.length === 0) return;
+  const allowed = new Set(allowedEntries.map((e) => posixEntry(e)));
+  const cliPaths = new Set([...allowed].filter((e) => /scripts\/cli\.(js|py)$/.test(e)));
+  for (const t of tools) {
+    if (!t.invoke) throw new Error(`Tool ${t.name} missing invoke`);
+    const ent = posixEntry(t.invoke.entry);
+    if (t.invoke.kind === 'script') {
+      if (!allowed.has(ent)) {
+        throw new Error(`Tool "${t.name}": invoke.entry "${ent}" is not an allowed script path`);
+      }
+    } else if (!cliPaths.has(ent)) {
+      throw new Error(
+        `Tool "${t.name}": cli_dispatch entry must be scripts/cli.js or scripts/cli.py, got "${ent}"`
+      );
+    }
+  }
+}
+
+export function findSkillRoot(extractDir: string): string | null {
   const stat = fs.statSync(extractDir);
 
   if (!stat.isDirectory()) {
@@ -233,49 +411,80 @@ function resolveEntrypoint(skillDir: string, runtimeLanguage: string | undefined
   return undefined;
 }
 
+/**
+ * Skill 包声明的工具实现；注册名形如 `skill:{skillName}:{toolName}`。
+ * 与构造函数内建 `BaseTool` 不同：仅当 AgentRuntime 判定该 skill 已通过主 `SKILL.md` 的 `load_more` 成功后，才会把对应 descriptor 下发给大模型。
+ */
 class SkillToolImpl extends BaseTool {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
   private skillId: string;
   private skillName: string;
-  private toolName: string;
+  private logicalToolName: string;
+  private invoke: SkillToolInvoke;
 
   constructor(skillId: string, skillName: string, tool: SkillTool) {
     super();
+    if (!tool.invoke || !isValidInvokeShape(tool.invoke)) {
+      throw new Error(`Skill tool "${tool.name}" is missing a valid invoke binding`);
+    }
     this.skillId = skillId;
     this.skillName = skillName;
-    this.toolName = tool.name;
+    this.logicalToolName = tool.name;
+    this.invoke = tool.invoke;
     this.name = `skill:${skillName}:${tool.name}`;
     this.description = tool.description;
     this.parameters = tool.parameters || { type: 'object', properties: {} };
   }
 
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    logger.info('SkillToolImpl', 'execute start', { skillId: this.skillId, skillName: this.skillName, toolName: this.toolName, args: JSON.stringify(args) });
+    logger.info('SkillToolImpl', 'execute start', {
+      skillId: this.skillId,
+      skillName: this.skillName,
+      toolName: this.logicalToolName,
+      invoke: this.invoke,
+      args: JSON.stringify(args),
+    });
     try {
-      const result = await skillRuntimeManager.invokeTool(this.skillId, this.toolName, args);
-      logger.info('SkillToolImpl', 'execute success', { skillName: this.skillName, toolName: this.toolName, result: JSON.stringify(result)?.slice(0, 200) });
+      const result = await skillRuntimeManager.invokeTool(this.skillId, this.invoke, args);
+      logger.info('SkillToolImpl', 'execute success', {
+        skillName: this.skillName,
+        toolName: this.logicalToolName,
+        result: JSON.stringify(result)?.slice(0, 200),
+      });
       return { success: true, output: JSON.stringify(result) };
     } catch (error) {
-      logger.error('SkillToolImpl', 'execute error', { skillName: this.skillName, toolName: this.toolName, error: String(error) });
+      logger.error('SkillToolImpl', 'execute error', {
+        skillName: this.skillName,
+        toolName: this.logicalToolName,
+        error: String(error),
+      });
       return { success: false, error: String(error) };
     }
   }
 }
 
-function registerSkillTools(skillId: string, skillName: string, tools: SkillTool[]): void {
-  for (const tool of tools) {
-    const toolName = `skill:${skillName}:${tool.name}`;
-    const skillTool = new SkillToolImpl(skillId, skillName, tool);
-    toolHub.register(skillTool, toolName);
+function registerSkillTools(
+  skillId: string,
+  skillName: string,
+  tools: SkillTool[],
+  runtimeLanguage?: string | null
+): void {
+  const normalized = normalizeManifestTools(tools, runtimeLanguage);
+  for (const tool of normalized) {
+    if (!tool.invoke) continue;
+    const logical = normalizeSkillToolLogicalName(tool.name);
+    const toolForImpl = logical === tool.name ? tool : { ...tool, name: logical };
+    const hubKey = skillToolHubKey(skillName, tool.name);
+    const skillTool = new SkillToolImpl(skillId, skillName, toolForImpl);
+    toolHub.register(skillTool, hubKey);
   }
 }
 
 function unregisterSkillTools(skillName: string): void {
-  const allTools = toolHub.listTools();
-  for (const tool of allTools) {
-    if (tool.name.startsWith(`skill:${skillName}:`)) {
+  for (const tool of toolHub.listTools()) {
+    if (isSkillToolName(tool.name) && tool.name.startsWith(`skill:${skillName}:`)) {
       toolHub.unregisterTool(tool.name);
     }
   }
@@ -292,7 +501,7 @@ export class SkillRegistry {
     const installedSkills = await this.listInstalled();
     for (const skill of installedSkills) {
       if (skill.tools && skill.tools.length > 0) {
-        registerSkillTools(skill.id, skill.name, skill.tools);
+        registerSkillTools(skill.id, skill.name, skill.tools, skill.runtimeLanguage);
       }
     }
   }
@@ -302,16 +511,20 @@ export class SkillRegistry {
       .from(schema.skills)
       .where(eq(schema.skills.enabled, true));
 
-    return results.map(row => ({
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      version: row.version || undefined,
-      author: row.author || undefined,
-      runtimeLanguage: row.runtimeLanguage || undefined,
-      tools: row.toolManifestJson ? JSON.parse(row.toolManifestJson) : [],
-      configSchema: row.configSchemaJson ? JSON.parse(row.configSchemaJson) : undefined,
-    }));
+    return results.map((row) => {
+      const rawTools: SkillTool[] = row.toolManifestJson ? JSON.parse(row.toolManifestJson) : [];
+      const tools = normalizeManifestTools(rawTools, row.runtimeLanguage);
+      return {
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        version: row.version || undefined,
+        author: row.author || undefined,
+        runtimeLanguage: row.runtimeLanguage || undefined,
+        tools,
+        configSchema: row.configSchemaJson ? JSON.parse(row.configSchemaJson) : undefined,
+      };
+    });
   }
 
   async findInstalledByName(name: string): Promise<typeof schema.skills.$inferSelect | null> {
@@ -322,8 +535,14 @@ export class SkillRegistry {
     return results.length > 0 ? results[0] : null;
   }
 
-  async previewPackage(zipPath: string): Promise<SkillPreview> {
-    const extractDir = zipPath;
+  /**
+   * @param extractDir Directory containing the extracted zip (or parent tree where `SKILL.md` can be found).
+   * @param options.materializeSkillToolsJson When true, writes `skill-tools.json` under the skill root (use for staged preview dirs only).
+   */
+  async previewPackage(
+    extractDir: string,
+    options?: { materializeSkillToolsJson?: boolean }
+  ): Promise<SkillPreview> {
     const rootDir = findSkillRoot(extractDir);
 
     if (!rootDir) {
@@ -334,6 +553,9 @@ export class SkillRegistry {
     const detectedLanguage = detectPackageLanguage(rootDir);
     const runtimeLanguage = meta.runtime || detectedLanguage || undefined;
     const tools = await this.extractToolManifest(rootDir);
+    if (options?.materializeSkillToolsJson) {
+      writeSkillToolsJson(rootDir, tools);
+    }
 
     return {
       name: meta.name,
@@ -387,7 +609,6 @@ export class SkillRegistry {
 
       const finalRuntime = runtimeLanguage || detected;
       const toolManifest = await this.extractToolManifest(targetDir);
-      const finalDetected = detected;
 
       if (previous) {
         await db.update(schema.skills)
@@ -397,7 +618,7 @@ export class SkillRegistry {
             version: meta.version,
             author: meta.author,
             runtimeLanguage: finalRuntime || null,
-            detectedLanguage: finalDetected || null,
+            detectedLanguage: detected || null,
             installMode: finalRuntime ? 'managed' : 'copy_only',
             rootDir: targetDir,
             entrypoint: resolveEntrypoint(targetDir, finalRuntime || undefined),
@@ -414,7 +635,7 @@ export class SkillRegistry {
           version: meta.version,
           author: meta.author,
           runtimeLanguage: finalRuntime || null,
-          detectedLanguage: finalDetected || null,
+          detectedLanguage: detected || null,
           installMode: finalRuntime ? 'managed' : 'copy_only',
           rootDir: targetDir,
           entrypoint: resolveEntrypoint(targetDir, finalRuntime || undefined),
@@ -427,7 +648,7 @@ export class SkillRegistry {
       }
 
       unregisterSkillTools(meta.name);
-      registerSkillTools(skillId, meta.name, toolManifest);
+      registerSkillTools(skillId, meta.name, toolManifest, finalRuntime);
 
       if (backupDir && fs.existsSync(backupDir)) {
         fs.rmSync(backupDir, { recursive: true, force: true });
@@ -460,36 +681,69 @@ export class SkillRegistry {
     }
   }
 
-  async extractToolManifest(skillDir: string): Promise<ScannedTool[]> {
+  async extractToolManifest(skillDir: string): Promise<SkillTool[]> {
     const skillMdPath = path.join(skillDir, 'SKILL.md');
-    const toolsDir = path.join(skillDir, 'scripts');
-
     if (!fs.existsSync(skillMdPath)) {
       return [];
     }
 
-    const skillMdContent = fs.readFileSync(skillMdPath, 'utf-8');
+    const detected = detectPackageLanguage(skillDir);
+    const ext: '.js' | '.py' | null =
+      detected === 'javascript' ? '.js' : detected === 'python' ? '.py' : null;
 
-    let scriptToolNames: string[] = [];
-    if (fs.existsSync(toolsDir) && fs.statSync(toolsDir).isDirectory()) {
-      try {
-        const files = fs.readdirSync(toolsDir);
-        scriptToolNames = files
-          .filter(f => f.endsWith('.js') || f.endsWith('.py'))
-          .map(f => path.basename(f, path.extname(f)));
-      } catch {
+    const author = parseAuthorToolManifest(skillDir);
+    if (author !== null) {
+      validateManifestInvokes(skillDir, author as Array<{ invoke: SkillToolInvoke }>);
+      if (detected === 'javascript' || detected === 'python') {
+        validateInvokesMatchRuntime(skillDir, detected, author);
       }
+      return author;
     }
 
-    if (scriptToolNames.length === 0) {
+    const allowedEntries = ext ? listScriptRelPaths(skillDir, ext) : [];
+    if (!ext || allowedEntries.length === 0) {
       return [];
     }
 
-    const toolsJson = await this.parseToolsWithLLM(skillMdContent, scriptToolNames);
-    return toolsJson;
+    const skillMdContent = fs.readFileSync(skillMdPath, 'utf-8');
+    const fromLlm = await this.parseToolsWithLLM(skillMdContent, allowedEntries, ext);
+
+    if (fromLlm.length > 0) {
+      validateManifestInvokes(skillDir, fromLlm as Array<{ invoke: SkillToolInvoke }>);
+      validateLlmInvokesAgainstAllowlist(fromLlm, allowedEntries);
+      if (detected === 'javascript' || detected === 'python') {
+        validateInvokesMatchRuntime(skillDir, detected, fromLlm);
+      }
+      return fromLlm;
+    }
+
+    const nonCli = allowedEntries.filter((p) => !/scripts\/cli\.(js|py)$/.test(p));
+    if (nonCli.length > 0) {
+      const discovered = nonCli.map((rel) => ({
+        name: path.basename(rel, ext),
+        description: `Execute ${rel} (auto-discovered).`,
+        invoke: { kind: 'script' as const, entry: rel },
+      }));
+      validateManifestInvokes(skillDir, discovered);
+      if (detected === 'javascript' || detected === 'python') {
+        validateInvokesMatchRuntime(skillDir, detected, discovered);
+      }
+      return discovered;
+    }
+
+    logger.warn(
+      'SkillRegistry',
+      'Only scripts/cli.* found; add skill-tools.json or configure LEADER for LLM manifest extraction',
+      { skillDir }
+    );
+    return [];
   }
 
-  private async parseToolsWithLLM(skillMdContent: string, toolNames: string[]): Promise<ScannedTool[]> {
+  private async parseToolsWithLLM(
+    skillMdContent: string,
+    allowedEntries: string[],
+    ext: '.js' | '.py'
+  ): Promise<SkillTool[]> {
     const leaderAgent = await db.select()
       .from(schema.agents)
       .where(eq(schema.agents.id, 'LEADER'));
@@ -515,29 +769,54 @@ export class SkillRegistry {
       timeout: 60000,
     });
 
-    const prompt = `Parse the SKILL.md content below and extract tool definitions.
-  Only extract tools that match these script names: ${toolNames.join(', ')}
-  Return a JSON array with format: [{"name": "toolName", "description": "description"}]
-  If a script name is not found in SKILL.md, do not include it in the result.
+    const fileList = allowedEntries.join('\n');
+    const prompt = `You are generating the tool manifest for a managed skill host.
 
-  SKILL.md content:
-  ---
-  ${skillMdContent}
-  ---
+The model will only see logical tool names as \`skill:{skillName}:{name}\`. Execution is resolved separately using the "invoke" object — do NOT assume name equals a filename.
 
-  Return only valid JSON, no other text.`;
+Known files under this package that may be executed (invoke.entry MUST be exactly one of these paths, using forward slashes):
+${fileList}
+
+Return a JSON array only. Each element:
+{
+  "name": "<api-safe logical id: letters, digits, underscore, hyphen>",
+  "description": "<what the planner should know>",
+  "invoke": { "kind": "script", "entry": "scripts/foo${ext}" }
+}
+OR if the skill documents a single CLI entrypoint like \`node scripts/cli${ext} <subcommand>\`:
+{
+  "name": "<logical id, often the subcommand>",
+  "description": "...",
+  "invoke": { "kind": "cli_dispatch", "entry": "scripts/cli${ext}", "subcommand": "<token passed as argv[1]>" }
+}
+
+Rules:
+- Every tool MUST include "invoke" with a valid kind.
+- For kind "script", the process is run as: node|python <entry> <jsonArgs> — one tool per script file when that matches the skill docs.
+- For kind "cli_dispatch", the process is: node|python <entry> <subcommand> <jsonArgs>.
+- "name" is the stable logical id for the API; it may differ from the script basename when the skill names operations differently.
+- Only declare tools that SKILL.md actually exposes as separate callable units.
+
+SKILL.md:
+---
+${skillMdContent}
+---
+
+Return only valid JSON array, no markdown or commentary.`;
 
     try {
       const response = await client.chat.completions.create({
         model: modelConfig.modelName,
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.3,
+        temperature: 0.2,
       });
 
       const content = response.choices[0]?.message?.content || '';
       const jsonMatch = content.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
+        const parsed = JSON.parse(jsonMatch[0]) as unknown;
+        if (!Array.isArray(parsed)) return [];
+        return coerceLlmTools(parsed);
       }
     } catch (error) {
       console.error('Failed to parse SKILL.md with LLM:', error);
@@ -562,7 +841,7 @@ export class SkillRegistry {
       cleanupRuntimeArtifacts(skill.runtimeLanguage, skill.rootDir);
     }
 
-    unregisterSkillTools(id);
+    unregisterSkillTools(skill.name);
     await skillRuntimeManager.stopIfRunning(id);
 
     if (fs.existsSync(skill.rootDir)) {
@@ -586,11 +865,15 @@ export class SkillRegistry {
         .where(eq(schema.skills.id, as.skillId));
 
       if (skill.length > 0 && skill[0].toolManifestJson) {
-        const tools = JSON.parse(skill[0].toolManifestJson) as SkillTool[];
-        allTools.push(...tools.map(t => ({
-          ...t,
-          name: `skill:${skill[0].name}:${t.name}`,
-        })));
+        const raw = JSON.parse(skill[0].toolManifestJson) as SkillTool[];
+        const tools = normalizeManifestTools(raw, skill[0].runtimeLanguage);
+        for (const t of tools) {
+          allTools.push({
+            name: `skill:${skill[0].name}:${t.name}`,
+            description: t.description,
+            parameters: t.parameters,
+          });
+        }
       }
     }
 

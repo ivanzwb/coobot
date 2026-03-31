@@ -3,6 +3,7 @@ import { db, schema } from '../db';
 import { eq } from 'drizzle-orm';
 import type { ToolPolicy, PermissionResult } from '../types';
 import { configManager } from './configManager';
+import { DEFAULT_BUILTIN_TOOL_POLICIES } from './builtinToolPolicies.js';
 
 export class SecuritySandbox {
   private blockedPaths = [
@@ -13,19 +14,23 @@ export class SecuritySandbox {
     'C:\\System32',
   ];
 
+  /** 表无记录时使用：内置 7 项来自代码；其余工具同策略。 */
   private defaultToolPolicies: Record<string, ToolPolicy> = {
-    read_file: 'ASK',
-    edit_file: 'ASK',
-    write_file: 'ASK',
-    list_directory: 'ALLOW',
-    exec_shell: 'DENY',
-    http_request: 'ASK',
-    clipboard: 'ASK',
-    system_info: 'ALLOW',
+    ...DEFAULT_BUILTIN_TOOL_POLICIES,
+    load_more: 'ALLOW',
   };
 
-  async intercept(agentId: string, tool: string, args: Record<string, unknown>): Promise<PermissionResult> {
-    const policy = await this.getPolicy(agentId, tool);
+  /**
+   * @param tool Primary tool id (canonical Hub name).
+   * @param alternateToolNames Extra ids to match DB rows (e.g. legacy malformed `skill:*` names from the model).
+   */
+  async intercept(
+    agentId: string,
+    tool: string,
+    args: Record<string, unknown>,
+    alternateToolNames?: string[]
+  ): Promise<PermissionResult> {
+    const policy = await this.getPolicy(agentId, tool, alternateToolNames);
     
     const permResult: PermissionResult = {
       policy,
@@ -45,20 +50,35 @@ export class SecuritySandbox {
     return { policy: 'ALLOW' };
   }
 
-  private async getPolicy(agentId: string, toolName: string): Promise<ToolPolicy> {
+  private async getPolicy(
+    agentId: string,
+    toolName: string,
+    alternateToolNames?: string[]
+  ): Promise<ToolPolicy> {
     const permissions = await db.select()
       .from(schema.agentToolPermissions)
       .where(
         eq(schema.agentToolPermissions.agentId, agentId)
       );
 
-    const toolPerm = permissions.find(p => p.toolName === toolName);
-    
-    if (toolPerm) {
-      return toolPerm.policy as ToolPolicy;
+    const candidates = [toolName, ...(alternateToolNames || [])].filter(
+      (n, i, a) => n && a.indexOf(n) === i
+    );
+
+    for (const name of candidates) {
+      const toolPerm = permissions.find((p) => p.toolName === name);
+      if (toolPerm) {
+        return toolPerm.policy as ToolPolicy;
+      }
     }
 
-    return this.defaultToolPolicies[toolName] || 'DENY';
+    for (const name of candidates) {
+      if (this.defaultToolPolicies[name]) {
+        return this.defaultToolPolicies[name];
+      }
+    }
+
+    return 'DENY';
   }
 
   private validateToolPath(args: Record<string, unknown>): void {
@@ -94,10 +114,6 @@ export class SecuritySandbox {
 
   getAllowedDomains(agentId: string): string[] {
     return ['api.openai.com', 'api.anthropic.com', 'localhost'];
-  }
-
-  getAllowedCommands(agentId: string): string[] {
-    return ['ls', 'cat', 'grep', 'find', 'echo'];
   }
 }
 

@@ -10,6 +10,7 @@ import { leaderAgent } from './leaderAgent.js';
 import { logger } from './logger.js';
 import { memoryEngine } from './memoryEngine.js';
 import { skillRegistry } from './skillRegistry.js';
+import { toolHub } from './toolHub.js';
 
 export class TaskOrchestrator extends EventEmitter {
   private taskQueue: Map<string, Task> = new Map();
@@ -423,17 +424,12 @@ export class TaskOrchestrator extends EventEmitter {
       }
     }
 
-    const capabilities = await db.select()
-      .from(schema.agentCapabilities)
-      .where(eq(schema.agentCapabilities.agentId, agent.id));
-
-    const agentTools = JSON.parse(capabilities[0].toolsJson || '[]');
+    const agentTools = toolHub.listBuiltinTools().map((t) => t.name);
 
     logger.info('TaskOrchestrator', 'buildAgentConfig', {
       agentId: agent.id,
-      capabilitiesFound: capabilities.length,
       tools: agentTools,
-      skills: agentSkills
+      skills: agentSkills,
     });
 
     return {
@@ -441,9 +437,9 @@ export class TaskOrchestrator extends EventEmitter {
       name: agent.name,
       type: agent.type,
       modelConfig,
-      rolePrompt: capabilities[0]?.rolePrompt || undefined,
-      behaviorRules: capabilities[0]?.behaviorRules || undefined,
-      capabilityBoundary: capabilities[0]?.capabilityBoundary || undefined,
+      rolePrompt: agent.rolePrompt || undefined,
+      behaviorRules: agent.behaviorRules || undefined,
+      capabilityBoundary: agent.capabilityBoundary || undefined,
       skills: agentSkills,
       tools: agentTools,
     };

@@ -4,6 +4,8 @@ import { configManager } from '../services/configManager';
 import * as schema from './schema';
 import path from 'path';
 import fs from 'fs';
+import { migrateMergeAgentCapabilities } from './migrateMergeAgentCapabilities.js';
+import { migrateDropAgentsToolsJson } from './migrateDropAgentsToolsJson.js';
 
 const workspacePath = configManager.getWorkspacePath();
 const databaseDir = path.join(workspacePath, 'database');
@@ -13,6 +15,9 @@ if (!fs.existsSync(databaseDir)) {
 const sqlitePath = path.join(databaseDir, 'biosbot.db');
 const sqlite = new Database(sqlitePath);
 sqlite.pragma('journal_mode = WAL');
+
+migrateMergeAgentCapabilities(sqlite);
+migrateDropAgentsToolsJson(sqlite);
 
 export const db = drizzle(sqlite, { schema });
 

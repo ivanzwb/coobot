@@ -2,21 +2,31 @@ import { Router, Request, Response } from 'express';
 import { db, schema } from '../db/index.js';
 import { eq, and } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { agentCapabilityRegistry, toolHub, knowledgeEngine, logger } from '../services/index.js';
+import { agentCapabilityRegistry, toolHub, knowledgeEngine } from '../services/index.js';
+import { getSkillNamesByAgentIds, getSkillNamesForAgent } from '../db/agentSkillQueries.js';
+import { persistAgentToolPolicy } from '../services/agentToolPermissionPersistence.js';
+import { ensureAgentSkillToolPermissions } from '../services/ensureAgentSkillToolPermissions.js';
 
 const router = Router();
 
+/** API: system builtins only; skill tools are bound via agent_skills and exposed to LLM only after load_more. */
+function builtinToolNames(): string[] {
+  return toolHub.listBuiltinTools().map((t) => t.name);
+}
+
 router.get('/capabilities', async (_req: Request, res: Response) => {
   try {
-    const capabilities = await db.select().from(schema.agentCapabilities);
-    const result = capabilities.map(cap => ({
-      agentId: cap.agentId,
-      status: cap.status,
-      skills: JSON.parse(cap.skillsJson || '[]'),
-      tools: JSON.parse(cap.toolsJson || '[]'),
-      rolePrompt: cap.rolePrompt || null, 
-      behaviorRules: cap.behaviorRules || null,
-      capabilityBoundary: cap.capabilityBoundary || null,
+    const agents = await db.select().from(schema.agents);
+    const skillNamesByAgent = await getSkillNamesByAgentIds(agents.map((a) => a.id));
+    const tools = builtinToolNames();
+    const result = agents.map((agent) => ({
+      agentId: agent.id,
+      status: agent.capabilityStatus,
+      skills: skillNamesByAgent.get(agent.id) ?? [],
+      tools,
+      rolePrompt: agent.rolePrompt ?? null,
+      behaviorRules: agent.behaviorRules ?? null,
+      capabilityBoundary: agent.capabilityBoundary ?? null,
     }));
     res.json(result);
   } catch (error) {
@@ -27,27 +37,21 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
 router.get('/', async (_req: Request, res: Response) => {
   try {
     const agents = await db.select().from(schema.agents);
-    const capabilities = await db.select().from(schema.agentCapabilities);
     const modelConfigs = await db.select().from(schema.modelConfigs);
-    
-    const capMap = new Map(capabilities.map(c => [c.agentId, c]));
-    const configMap = new Map(modelConfigs.map(c => [c.id, c]));
-    
-    const result = agents.map(agent => {
-      const cap = capMap.get(agent.id);
-      return {
-        ...agent,
-        rolePrompt: cap?.rolePrompt || null,
-        behaviorRules: cap?.behaviorRules || null,
-        capabilityBoundary: cap?.capabilityBoundary || null,
-        modelConfig: agent.modelConfigId ? configMap.get(agent.modelConfigId) : null,
-        capabilities: cap ? {
-          skills: JSON.parse(cap.skillsJson || '[]'),
-          tools: JSON.parse(cap.toolsJson || '[]'),
-          status: cap.status,
-        } : null,
-      };
-    });
+    const skillNamesByAgent = await getSkillNamesByAgentIds(agents.map((a) => a.id));
+    const tools = builtinToolNames();
+
+    const configMap = new Map(modelConfigs.map((c) => [c.id, c]));
+
+    const result = agents.map((agent) => ({
+      ...agent,
+      modelConfig: agent.modelConfigId ? configMap.get(agent.modelConfigId) : null,
+      capabilities: {
+        skills: skillNamesByAgent.get(agent.id) ?? [],
+        tools,
+        status: agent.capabilityStatus,
+      },
+    }));
 
     res.json(result);
   } catch (error) {
@@ -88,33 +92,7 @@ router.put('/:id/tools/permissions', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid policy' });
     }
 
-    const existing = await db.select()
-      .from(schema.agentToolPermissions)
-      .where(
-        and(
-          eq(schema.agentToolPermissions.agentId, agentId),
-          eq(schema.agentToolPermissions.toolName, toolName)
-        )
-      );
-
-    if (existing.length > 0) {
-      await db.update(schema.agentToolPermissions)
-        .set({ policy, updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.agentToolPermissions.agentId, agentId),
-            eq(schema.agentToolPermissions.toolName, toolName)
-          )
-        );
-    } else {
-      await db.insert(schema.agentToolPermissions)
-        .values({
-          agentId,
-          toolName,
-          policy,
-          updatedAt: new Date(),
-        });
-    }
+    await persistAgentToolPolicy(agentId, toolName, policy);
 
     res.json({ success: true });
   } catch (error) {
@@ -133,13 +111,11 @@ router.get('/:id', async (req: Request, res: Response) => {
     }
 
     const agent = agents[0];
-    const capabilities = await db.select()
-      .from(schema.agentCapabilities)
-      .where(eq(schema.agentCapabilities.agentId, req.params.id as string));
-
-    const skills = await db.select()
+    const skillRows = await db
+      .select()
       .from(schema.agentSkills)
       .where(eq(schema.agentSkills.agentId, req.params.id as string));
+    const skillNames = await getSkillNamesForAgent(req.params.id as string);
 
     let modelConfig = null;
     if (agent.modelConfigId) {
@@ -153,16 +129,13 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     res.json({
       ...agent,
-      rolePrompt: capabilities[0]?.rolePrompt || null,
-      behaviorRules: capabilities[0]?.behaviorRules || null,
-      capabilityBoundary: capabilities[0]?.capabilityBoundary || null,
       modelConfig,
-      capabilities: capabilities[0] ? {
-        skills: JSON.parse(capabilities[0].skillsJson || '[]'),
-        tools: JSON.parse(capabilities[0].toolsJson || '[]'),
-        status: capabilities[0].status,
-      } : null,
-      skills: skills.map(s => s.skillId),
+      capabilities: {
+        skills: skillNames,
+        tools: builtinToolNames(),
+        status: agent.capabilityStatus,
+      },
+      skills: skillRows.map((s) => s.skillId),
     });
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -174,7 +147,7 @@ router.post('/', async (req: Request, res: Response) => {
     const { name, type, modelConfigId, skills, temperature, rolePrompt, behaviorRules, capabilityBoundary } = req.body;
     
     const id = uuidv4();
-    
+
     await db.insert(schema.agents).values({
       id,
       name,
@@ -182,6 +155,11 @@ router.post('/', async (req: Request, res: Response) => {
       modelConfigId: modelConfigId || null,
       temperature: temperature || null,
       status: 'IDLE',
+      rolePrompt: rolePrompt ?? null,
+      behaviorRules: behaviorRules ?? null,
+      capabilityBoundary: capabilityBoundary ?? null,
+      capabilityStatus: 'ONLINE',
+      lastCapabilityHeartbeat: new Date(),
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -191,32 +169,11 @@ router.post('/', async (req: Request, res: Response) => {
       name,
       status: 'ONLINE',
       skills: skills || [],
-      tools: toolHub.listTools().map(t => t.name),
+      tools: toolHub.listBuiltinTools().map((t) => t.name),
       rolePrompt: rolePrompt || '',
       behaviorRules: behaviorRules || '',
       capabilityBoundary: capabilityBoundary || '',
     });
-
-    const defaultTools = toolHub.listTools().map(t => t.name);
-    const defaultToolPolicies: Record<string, string> = {
-      read_file: 'ASK',
-      edit_file: 'ASK',
-      write_file: 'ASK',
-      list_directory: 'ALLOW',
-      exec_shell: 'DENY',
-      http_request: 'ASK',
-      system_info: 'ALLOW',
-    };
-
-    for (const toolName of defaultTools) {
-      const policy = defaultToolPolicies[toolName] || 'DENY';
-      await db.insert(schema.agentToolPermissions).values({
-        agentId: id,
-        toolName,
-        policy,
-        updatedAt: new Date(),
-      }).onConflictDoNothing();
-    }
 
     const agent = await db.select()
       .from(schema.agents)
@@ -232,39 +189,22 @@ router.post('/', async (req: Request, res: Response) => {
 
 router.put('/:id', async (req: Request, res: Response) => {
   try {
+    const agentId = req.params.id as string;
     const { name, modelConfigId, temperature, rolePrompt, behaviorRules, capabilityBoundary } = req.body;
 
-    await db.update(schema.agents)
-      .set({
-        name: name,
-        modelConfigId: modelConfigId,
-        temperature: temperature !== undefined ? temperature : undefined,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.agents.id, req.params.id as string));
+    const agentUpdate: Record<string, unknown> = { updatedAt: new Date() };
+    if (name !== undefined) agentUpdate.name = name;
+    if (modelConfigId !== undefined) agentUpdate.modelConfigId = modelConfigId;
+    if (temperature !== undefined) agentUpdate.temperature = temperature;
+    if (rolePrompt !== undefined) agentUpdate.rolePrompt = rolePrompt;
+    if (behaviorRules !== undefined) agentUpdate.behaviorRules = behaviorRules;
+    if (capabilityBoundary !== undefined) agentUpdate.capabilityBoundary = capabilityBoundary;
 
-    if (rolePrompt !== undefined || behaviorRules !== undefined || capabilityBoundary !== undefined) {
-      const existing = await db.select()
-        .from(schema.agentCapabilities)
-        .where(eq(schema.agentCapabilities.agentId, req.params.id as string));
-      
-      if (existing.length > 0) {
-        const updateData: Record<string, unknown> = { updatedAt: new Date() };
-        if (rolePrompt !== undefined) updateData.rolePrompt = rolePrompt;
-        if (behaviorRules !== undefined) updateData.behaviorRules = behaviorRules;
-        if (capabilityBoundary !== undefined) updateData.capabilityBoundary = capabilityBoundary;
-        
-        await db.update(schema.agentCapabilities)
-          .set(updateData)
-          .where(eq(schema.agentCapabilities.agentId, req.params.id as string));
-      } else {
-        logger.error('Agent', `Agent ${name} update failed, capabilities is missing, delete and recreate.`);
-      }
-    }
+    await db.update(schema.agents).set(agentUpdate).where(eq(schema.agents.id, agentId));
 
     const agents = await db.select()
       .from(schema.agents)
-      .where(eq(schema.agents.id, req.params.id as string));
+      .where(eq(schema.agents.id, agentId));
 
     if (agents.length === 0) {
       return res.status(404).json({ error: 'Agent not found' });
@@ -281,16 +221,12 @@ router.put('/:id', async (req: Request, res: Response) => {
       }
     }
 
-    const capabilities = await db.select()
-      .from(schema.agentCapabilities)
-      .where(eq(schema.agentCapabilities.agentId, req.params.id as string));
-
-    res.json({ 
-      ...agent, 
+    res.json({
+      ...agent,
       modelConfig,
-      rolePrompt: capabilities[0].rolePrompt || '',
-      behaviorRules: capabilities[0].behaviorRules || '',
-      capabilityBoundary: capabilities[0].capabilityBoundary || '',
+      rolePrompt: agent.rolePrompt ?? '',
+      behaviorRules: agent.behaviorRules ?? '',
+      capabilityBoundary: agent.capabilityBoundary ?? '',
     });
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -301,9 +237,6 @@ router.delete('/:id', async (req: Request, res: Response) => {
   try {
     await db.delete(schema.agentToolPermissions)
       .where(eq(schema.agentToolPermissions.agentId, req.params.id as string));
-
-    await db.delete(schema.agentCapabilities)
-      .where(eq(schema.agentCapabilities.agentId, req.params.id as string));
 
     await db.delete(schema.agentSkills)
       .where(eq(schema.agentSkills.agentId, req.params.id as string));
@@ -335,27 +268,8 @@ router.post('/:id/skills', async (req: Request, res: Response) => {
     if (skillData.length > 0) {
       const skill = skillData[0];
       try {
-        const toolsManifest = JSON.parse(skill.toolManifestJson || '[]');
-        for (const tool of toolsManifest) {
-          const toolName = `skill:${skill.name}:${tool.name}`;
-          const existingPerm = await db.select()
-            .from(schema.agentToolPermissions)
-            .where(
-              and(
-                eq(schema.agentToolPermissions.agentId, agentId),
-                eq(schema.agentToolPermissions.toolName, toolName)
-              )
-            );
-          
-          if (existingPerm.length === 0) {
-            await db.insert(schema.agentToolPermissions).values({
-              agentId,
-              toolName,
-              policy: 'ASK',
-              updatedAt: new Date(),
-            });
-          }
-        }
+        const toolsManifest = JSON.parse(skill.toolManifestJson || '[]') as { name?: unknown }[];
+        await ensureAgentSkillToolPermissions(agentId, skill.name, toolsManifest);
       } catch (e) {
         console.error('Failed to parse toolManifestJson:', e);
       }
@@ -386,20 +300,22 @@ router.delete('/:id/skills/:skillId', async (req: Request, res: Response) => {
     
     if (skillData.length > 0) {
       const skill = skillData[0];
-      try {
-        const toolsManifest = JSON.parse(skill.toolManifestJson || '[]');
-        for (const tool of toolsManifest) {
-          const toolName = `skill:${skill.name}:${tool.name}`;
-          await db.delete(schema.agentToolPermissions)
+      const prefix = `skill:${skill.name}:`;
+      const permRows = await db
+        .select()
+        .from(schema.agentToolPermissions)
+        .where(eq(schema.agentToolPermissions.agentId, agentId));
+      for (const p of permRows) {
+        if (p.toolName.startsWith(prefix)) {
+          await db
+            .delete(schema.agentToolPermissions)
             .where(
               and(
                 eq(schema.agentToolPermissions.agentId, agentId),
-                eq(schema.agentToolPermissions.toolName, toolName)
+                eq(schema.agentToolPermissions.toolName, p.toolName)
               )
             );
         }
-      } catch (e) {
-        console.error('Failed to parse toolManifestJson:', e);
       }
     }
 
@@ -413,20 +329,19 @@ router.post('/:id/enable', async (req: Request, res: Response) => {
   try {
     const agentId = req.params.id as string;
 
-    const existing = await db.select()
-      .from(schema.agentCapabilities)
-      .where(eq(schema.agentCapabilities.agentId, agentId));
-
-    if (existing.length > 0) {
-      await db.update(schema.agentCapabilities)
-        .set({ status: 'ONLINE', updatedAt: new Date() })
-        .where(eq(schema.agentCapabilities.agentId, agentId));
-    } else {
-      return res.status(404).json({ error: 'Agent capabilities not found' });
+    const rows = await db.select().from(schema.agents).where(eq(schema.agents.id, agentId));
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Agent not found' });
     }
 
-    await db.update(schema.agents)
-      .set({ status: 'IDLE', updatedAt: new Date() })
+    await db
+      .update(schema.agents)
+      .set({
+        capabilityStatus: 'ONLINE',
+        lastCapabilityHeartbeat: new Date(),
+        status: 'IDLE',
+        updatedAt: new Date(),
+      })
       .where(eq(schema.agents.id, agentId));
 
     res.json({ success: true, enabled: true });
@@ -439,20 +354,18 @@ router.post('/:id/disable', async (req: Request, res: Response) => {
   try {
     const agentId = req.params.id as string;
 
-    const existing = await db.select()
-      .from(schema.agentCapabilities)
-      .where(eq(schema.agentCapabilities.agentId, agentId));
-
-    if (existing.length > 0) {
-      await db.update(schema.agentCapabilities)
-        .set({ status: 'OFFLINE', updatedAt: new Date() })
-        .where(eq(schema.agentCapabilities.agentId, agentId));
-    } else {
-      return res.status(404).json({ error: 'Agent capabilities not found' });
+    const rows = await db.select().from(schema.agents).where(eq(schema.agents.id, agentId));
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Agent not found' });
     }
 
-    await db.update(schema.agents)
-      .set({ status: 'OFFLINE', updatedAt: new Date() })
+    await db
+      .update(schema.agents)
+      .set({
+        capabilityStatus: 'OFFLINE',
+        status: 'OFFLINE',
+        updatedAt: new Date(),
+      })
       .where(eq(schema.agents.id, agentId));
 
     res.json({ success: true, enabled: false });

@@ -1,6 +1,13 @@
 import { Router, Request, Response } from 'express';
 import { db, schema } from '../db/index.js';
-import { eq, and } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
+import {
+  BUILTIN_TOOL_NAMES,
+  BUILTIN_TOOL_DESCRIPTIONS,
+  getDefaultBuiltinToolPolicy,
+} from '../services/builtinToolPolicies.js';
+import { persistAgentToolPolicy } from '../services/agentToolPermissionPersistence.js';
+import { skillToolHubKey } from '../services/skillToolNames.js';
 
 const router = Router();
 
@@ -10,16 +17,11 @@ router.get('/:agentId', async (req: Request, res: Response) => {
       .from(schema.agentToolPermissions)
       .where(eq(schema.agentToolPermissions.agentId, req.params.agentId as string));
 
-    const defaultTools = [
-      { toolName: 'read_file', policy: 'ASK', description: '读取本地文件' },
-      { toolName: 'write_file', policy: 'ASK', description: '写入本地文件' },
-      { toolName: 'edit_file', policy: 'ASK', description: '编辑本地文件' },
-      { toolName: 'list_directory', policy: 'ALLOW', description: '列出目录内容' },
-      { toolName: 'exec_shell', policy: 'DENY', description: '执行 Shell 命令' },
-      { toolName: 'http_request', policy: 'ASK', description: '发送 HTTP 请求' },
-      { toolName: 'clipboard', policy: 'ASK', description: '操作剪贴板' },
-      { toolName: 'system_info', policy: 'ALLOW', description: '获取系统信息' },
-    ];
+    const defaultTools = BUILTIN_TOOL_NAMES.map((toolName) => ({
+      toolName,
+      policy: getDefaultBuiltinToolPolicy(toolName)!,
+      description: BUILTIN_TOOL_DESCRIPTIONS[toolName],
+    }));
 
     let skillTools: { toolName: string; policy: string; description: string }[] = [];
     const agentSkillsList = await db.select()
@@ -36,7 +38,7 @@ router.get('/:agentId', async (req: Request, res: Response) => {
         try {
           const toolsManifest = JSON.parse(skill.toolManifestJson || '[]');
           for (const tool of toolsManifest) {
-            const skillToolName = `skill:${skill.name}:${tool.name}`;
+            const skillToolName = skillToolHubKey(skill.name, typeof tool.name === 'string' ? tool.name : '');
             const customPerm = permissions.find(p => p.toolName === skillToolName);
             skillTools.push({
               toolName: skillToolName,
@@ -74,33 +76,7 @@ router.put('/:agentId', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid policy' });
     }
 
-    const existing = await db.select()
-      .from(schema.agentToolPermissions)
-      .where(
-        and(
-          eq(schema.agentToolPermissions.agentId, agentId as string),
-          eq(schema.agentToolPermissions.toolName, toolName)
-        )
-      );
-
-    if (existing.length > 0) {
-      await db.update(schema.agentToolPermissions)
-        .set({ policy, updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.agentToolPermissions.agentId, agentId as string),
-            eq(schema.agentToolPermissions.toolName, toolName)
-          )
-        );
-    } else {
-      await db.insert(schema.agentToolPermissions)
-        .values({
-          agentId: agentId as string,
-          toolName,
-          policy,
-          updatedAt: new Date(),
-        });
-    }
+    await persistAgentToolPolicy(agentId as string, toolName, policy);
 
     res.json({ success: true });
   } catch (error) {

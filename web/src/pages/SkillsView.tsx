@@ -13,13 +13,15 @@ interface Skill {
 }
 
 interface SkillPreview {
-  skillId: string;
+  skillId?: string;
+  /** Present when zip was staged under server temp; import sends this instead of re-uploading the zip. */
+  previewId?: string;
   name: string;
   description: string;
   version?: string;
   runtimeLanguage?: string;
   installMode?: string;
-  tools: { name: string; description: string }[];
+  tools: { name: string; description: string; invoke?: unknown }[];
 }
 
 const SkillsView: React.FC = () => {
@@ -92,10 +94,14 @@ const SkillsView: React.FC = () => {
       const reader = new FileReader();
       reader.onload = async () => {
         const base64 = (reader.result as string).split(',')[1];
-        await axios.post('/api/v1/skills/import', {
-          fileContent: base64,
-          encoding: 'base64',
-        });
+        if (preview.previewId) {
+          await axios.post('/api/v1/skills/import', { previewId: preview.previewId });
+        } else {
+          await axios.post('/api/v1/skills/import', {
+            fileContent: base64,
+            encoding: 'base64',
+          });
+        }
         resetAndRefresh();
       };
       reader.onerror = () => {
@@ -185,7 +191,13 @@ const SkillsView: React.FC = () => {
               {preview.installMode && <span className="tag">{preview.installMode}</span>}
             </div>
 
-            {(preview.tools?.length ?? 0) > 0 && (
+            {preview.tools.length === 0 && (
+              <div style={{ color: '#666', marginBottom: 12, fontSize: 13 }}>
+                当前包未解析出任何托管工具（仍可能为 copy_only 类 Skill）。
+              </div>
+            )}
+
+            {preview.tools.length > 0 && (
               <div>
                 <div style={{ fontWeight: 500, marginBottom: 8 }}>提供的工具:</div>
                 {preview.tools.map((tool, i) => (
@@ -204,6 +216,12 @@ const SkillsView: React.FC = () => {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {preview.previewId && (
+              <div style={{ color: '#666', marginBottom: 12, fontSize: 12 }}>
+                已生成清单并暂存在服务端，确认导入时将直接使用该目录（无需再次上传 zip）。
               </div>
             )}
 

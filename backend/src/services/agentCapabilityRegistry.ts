@@ -1,40 +1,33 @@
 import { db, schema } from '../db';
 import { eq } from 'drizzle-orm';
 import type { DomainAgentProfile } from '../types';
+import { getSkillNamesForAgent } from '../db/agentSkillQueries.js';
+import { toolHub } from './toolHub.js';
 
 export class AgentCapabilityRegistry {
   private agentProfiles: Map<string, DomainAgentProfile> = new Map();
-  private heartbeatTimeoutMs: number = 30000;
-  private heartbeatTimers: Map<string, NodeJS.Timeout> = new Map();
+
+  /** Builtin tools only; `skill:*` (SkillToolImpl) are not part of agent “default toolkit” metadata. */
+  private builtinToolNames(): string[] {
+    return toolHub.listBuiltinTools().map((t) => t.name);
+  }
 
   async register(profile: DomainAgentProfile): Promise<void> {
-    this.agentProfiles.set(profile.agentId, profile);
-    
-    await db.insert(schema.agentCapabilities)
-      .values({
-        agentId: profile.agentId,
-        skillsJson: JSON.stringify(profile.skills),
-        toolsJson: JSON.stringify(profile.tools),
-        rolePrompt: profile.rolePrompt || '',
-        behaviorRules: profile.behaviorRules || '',
-        capabilityBoundary: profile.capabilityBoundary || '',
-        lastHeartbeat: new Date(),
-        status: 'ONLINE',
+    const skills = await getSkillNamesForAgent(profile.agentId);
+    const tools = this.builtinToolNames();
+    this.agentProfiles.set(profile.agentId, { ...profile, skills, tools });
+
+    await db
+      .update(schema.agents)
+      .set({
+        rolePrompt: profile.rolePrompt ?? null,
+        behaviorRules: profile.behaviorRules ?? null,
+        capabilityBoundary: profile.capabilityBoundary ?? null,
+        lastCapabilityHeartbeat: new Date(),
+        capabilityStatus: 'ONLINE',
         updatedAt: new Date(),
       })
-      .onConflictDoUpdate({
-        target: schema.agentCapabilities.agentId,
-        set: {
-          skillsJson: JSON.stringify(profile.skills),
-          toolsJson: JSON.stringify(profile.tools),
-          rolePrompt: profile.rolePrompt,
-          behaviorRules: profile.behaviorRules,
-          capabilityBoundary: profile.capabilityBoundary,
-          status: 'ONLINE',
-          lastHeartbeat: new Date(),
-          updatedAt: new Date(),
-        },
-      });
+      .where(eq(schema.agents.id, profile.agentId));
   }
 
   async updateHeartbeat(agentId: string): Promise<void> {
@@ -44,46 +37,41 @@ export class AgentCapabilityRegistry {
       this.agentProfiles.set(agentId, profile);
     }
 
-    await db.update(schema.agentCapabilities)
+    await db
+      .update(schema.agents)
       .set({
-        lastHeartbeat: new Date(),
-        status: 'ONLINE',
+        lastCapabilityHeartbeat: new Date(),
+        capabilityStatus: 'ONLINE',
         updatedAt: new Date(),
       })
-      .where(eq(schema.agentCapabilities.agentId, agentId));
+      .where(eq(schema.agents.id, agentId));
   }
 
   async getActiveAgents(filters?: { skills?: string[]; excludeBusy?: boolean }): Promise<DomainAgentProfile[]> {
     const agents = await db.select().from(schema.agents).where(eq(schema.agents.status, 'IDLE'));
-    const capabilities = await db.select().from(schema.agentCapabilities);
-    
-    const capabilitiesMap = new Map(capabilities.map(c => [c.agentId, c]));
     const profiles: DomainAgentProfile[] = [];
 
     for (const agent of agents) {
-      const cap = capabilitiesMap.get(agent.id);
-      if (!cap) continue;
-
-      if (cap.status !== 'ONLINE') {
+      if (agent.capabilityStatus !== 'ONLINE') {
         continue;
       }
 
-      const skills = JSON.parse(cap.skillsJson || '[]');
-      
+      const skills = await getSkillNamesForAgent(agent.id);
+
       if (filters?.skills) {
-        const hasAllSkills = filters.skills.every(s => skills.includes(s));
+        const hasAllSkills = filters.skills.every((s) => skills.includes(s));
         if (!hasAllSkills) continue;
       }
 
       profiles.push({
         agentId: agent.id,
         name: agent.name,
-        status: cap.status as 'ONLINE' | 'BUSY' | 'OFFLINE',
+        status: (agent.capabilityStatus || 'OFFLINE') as 'ONLINE' | 'BUSY' | 'OFFLINE',
         skills,
-        tools: JSON.parse(cap.toolsJson || '[]'),
-        rolePrompt: cap.rolePrompt || undefined,
-        behaviorRules: cap.behaviorRules || undefined,
-        capabilityBoundary: cap.capabilityBoundary || undefined,
+        tools: this.builtinToolNames(),
+        rolePrompt: agent.rolePrompt || undefined,
+        behaviorRules: agent.behaviorRules || undefined,
+        capabilityBoundary: agent.capabilityBoundary || undefined,
       });
     }
 
@@ -97,12 +85,13 @@ export class AgentCapabilityRegistry {
       this.agentProfiles.set(agentId, profile);
     }
 
-    await db.update(schema.agentCapabilities)
+    await db
+      .update(schema.agents)
       .set({
-        status: 'OFFLINE',
+        capabilityStatus: 'OFFLINE',
         updatedAt: new Date(),
       })
-      .where(eq(schema.agentCapabilities.agentId, agentId));
+      .where(eq(schema.agents.id, agentId));
   }
 
   getAgentProfile(agentId: string): DomainAgentProfile | undefined {
@@ -110,23 +99,20 @@ export class AgentCapabilityRegistry {
   }
 
   async loadFromDatabase(): Promise<void> {
-    const capabilities = await db.select().from(schema.agentCapabilities);
     const agents = await db.select().from(schema.agents);
-    const agentMap = new Map(agents.map(a => [a.id, a]));
 
-    for (const cap of capabilities) {
-      const agent = agentMap.get(cap.agentId);
-      if (!agent) continue;
+    for (const agent of agents) {
+      const skills = await getSkillNamesForAgent(agent.id);
 
-      this.agentProfiles.set(cap.agentId, {
-        agentId: cap.agentId,
+      this.agentProfiles.set(agent.id, {
+        agentId: agent.id,
         name: agent.name,
-        status: cap.status as 'ONLINE' | 'BUSY' | 'OFFLINE',
-        skills: JSON.parse(cap.skillsJson || '[]'),
-        tools: JSON.parse(cap.toolsJson || '[]'),
-        rolePrompt: cap.rolePrompt || undefined,
-        behaviorRules: cap.behaviorRules || undefined,
-        capabilityBoundary: cap.capabilityBoundary || undefined,
+        status: (agent.capabilityStatus || 'OFFLINE') as 'ONLINE' | 'BUSY' | 'OFFLINE',
+        skills,
+        tools: this.builtinToolNames(),
+        rolePrompt: agent.rolePrompt || undefined,
+        behaviorRules: agent.behaviorRules || undefined,
+        capabilityBoundary: agent.capabilityBoundary || undefined,
       });
     }
   }

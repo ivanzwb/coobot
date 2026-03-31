@@ -46,7 +46,16 @@ export class LeaderAgent extends EventEmitter {
       await taskOrchestrator.updateTaskStatus(task.id, 'PARSING');
 
       const inputPayload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
-      const userInput = typeof inputPayload === 'string' ? inputPayload : inputPayload.content || '';
+      const baseContent =
+        typeof inputPayload === 'string' ? inputPayload : inputPayload.content || '';
+      const clarificationReply =
+        typeof inputPayload === 'object' && inputPayload
+          ? (inputPayload as Record<string, unknown>).clarificationReply ??
+            (inputPayload as Record<string, unknown>).clarification
+          : '';
+      const userInput = clarificationReply
+        ? `${baseContent}\n\n【用户补充】\n${String(clarificationReply)}`
+        : baseContent;
 
       const availableAgents = await agentCapabilityRegistry.getActiveAgents();
 
@@ -59,12 +68,16 @@ export class LeaderAgent extends EventEmitter {
       });
 
       if (taskAnalysis.confidenceScore < DEFAULT_CONFIDENCE_THRESHOLD || taskAnalysis.subtasks.length === 0) {
-        await taskOrchestrator.updateTaskStatus(task.id, 'CLARIFICATION_PENDING');
         const questions = taskAnalysis.clarificationQuestions || ['请提供更多信息以便我更好地理解您的需求'];
+        const systemText =
+          '需要您补充以下信息后再继续处理（可直接在下方输入框回复）：\n\n' +
+          questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
+        await memoryEngine.appendMessage('system', systemText, [], task.id);
+        await taskOrchestrator.updateTaskStatus(task.id, 'CLARIFICATION_PENDING');
         this.emit('clarification_needed', {
           taskId: task.id,
           questions,
-          reason: `confidenceScore (${taskAnalysis.confidenceScore}) below threshold`
+          reason: `confidenceScore (${taskAnalysis.confidenceScore}) below threshold`,
         });
         eventBus.emitClarificationNeeded(task.id, questions);
         return;
@@ -134,15 +147,14 @@ export class LeaderAgent extends EventEmitter {
     const context = await memoryEngine.getActiveHistory(5);
     const historyText = context.map(h => `${h.role}: ${h.content}`).join('\n');
 
-    const leaderCapability = await db.select()
-      .from(schema.agentCapabilities)
-      .where(eq(schema.agentCapabilities.agentId, this.leaderAgentId));
+    const leaderRows = await db.select().from(schema.agents).where(eq(schema.agents.id, this.leaderAgentId));
+    const leaderRow = leaderRows[0];
 
-    const roleDescription = leaderCapability[0]?.rolePrompt
+    const roleDescription = leaderRow?.rolePrompt
       || 'You are the core decision-maker for task planning and scheduling. Your responsibility is to analyze user requirements, plan task flows, and coordinate domain agents to complete tasks.';
-    const behaviorGuidelines = leaderCapability[0]?.behaviorRules
+    const behaviorGuidelines = leaderRow?.behaviorRules
       || '1. Understand user requirements and analyze task intent\n2. Break down complex tasks into executable subtasks\n3. Assign tasks reasonably based on agent capabilities\n4. Ensure correct task dependencies\n5. Ask for clarification from user when necessary';
-    const constraints = leaderCapability[0]?.capabilityBoundary
+    const constraints = leaderRow?.capabilityBoundary
       || '1. Only dispatch registered agents, do not execute specific tasks directly\n2. Task assignment must use valid Agent IDs\n3. Request clarification when confidence is below 0.7\n4. Clearly inform the user when tasks cannot be assigned';
 
     const agentListJson = JSON.stringify(availableAgents.map(a => ({
@@ -296,7 +308,7 @@ export class LeaderAgent extends EventEmitter {
     const inputPayload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
     const updatedPayload = {
       ...inputPayload,
-      clarification,
+      clarificationReply: clarification,
     };
 
     await db.update(schema.tasks)

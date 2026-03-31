@@ -5,7 +5,7 @@ import type { ModelConfig as DbModelConfig } from '../db';
 import type { Task } from '../db';
 import { knowledgeEngine } from './knowledgeEngine';
 import { memoryEngine } from './memoryEngine';
-import { toolHub } from './toolHub';
+import { toolHub, isSkillToolName, type ToolDescriptor } from './toolHub';
 import { taskOrchestrator } from './taskOrchestrator';
 import { eventBus } from './eventBus.js';
 import { logger } from './logger.js';
@@ -45,6 +45,7 @@ export interface AgentConfig {
   behaviorRules?: string;
   capabilityBoundary?: string;
   skills: AgentSkill[];
+  /** System builtin tool names only (`skill:*` excluded; those appear in LLM schema only after load_more). */
   tools: string[];
 }
 
@@ -168,7 +169,17 @@ export class AgentRuntime extends EventEmitter {
     })
 
     const skillsText = agentConfig.skills.length > 0
-      ? `\nAvailable Skills (lazy load - use skill name to load when needed):\n${agentConfig.skills.map(s => `- ${s.name}: ${s.description}`).join('\n')}`
+      ? `\n## Available Skills (Lazy Load Framework)
+
+你只能通过 \`load_more\` 工具加载 skill 的完整内容后才能使用该 skill。**禁止直接调用 skill 工具**。
+
+Available skills:
+${agentConfig.skills.map(s => `- **${s.name}**: ${s.description}`).join('\n')}
+
+**使用流程：**
+1. 首先调用 \`load_more(skill_name="skill-name")\` 加载完整 SKILL.md 内容
+2. 阅读完 SKILL.md 后，根据其中的说明调用对应的 skill 工具
+3. 如需加载 references 文档: \`load_more(skill_name="skill-name", reference="reference-name")\``
       : '';
 
     let basePrompt = parts.join('\n\n');
@@ -211,17 +222,23 @@ export class AgentRuntime extends EventEmitter {
       messages.push({ role: 'system', content: `User preferences and context:\n${context.memoryContext}` });
     }
 
-    const loadedSkills: Set<string> = new Set();
-    const loadedToolNames: string[] = [];
+    /** Skill **names** that have successfully loaded main SKILL.md via `load_more` this task (not reference-only). */
+    const loadedSkillNames = new Set<string>();
 
     while (stepIndex < this.maxReActSteps) {
-      logger.debug('AgentRuntime', 'ReAct step', { taskId: task.id, stepIndex, type: 'THOUGHT', tools: loadedToolNames });
+      logger.debug('AgentRuntime', 'ReAct step', {
+        taskId: task.id,
+        stepIndex,
+        type: 'THOUGHT',
+        loadedSkills: [...loadedSkillNames],
+      });
 
       const response = await this.callModelWithMessages(
         messages,
         agentConfig.modelConfig,
         agentConfig.temperature,
-        loadedToolNames
+        agentConfig,
+        loadedSkillNames
       );
 
       const thought = response.content;
@@ -236,11 +253,19 @@ export class AgentRuntime extends EventEmitter {
 
       if (response.toolCall) {
         logger.info('AgentRuntime', 'Executing tool call', { taskId: task.id, toolName: response.toolCall.name, args: JSON.stringify(response.toolCall.args) });
-        
+
         const action = response.toolCall.name;
         const actionInput = response.toolCall.args;
 
-        const toolResult = await this.executeTool(agentConfig.id, action, actionInput);
+        const toolResult = await this.executeTool(
+          agentConfig.id,
+          action,
+          actionInput,
+          task.id,
+          agentConfig,
+          loadedSkillNames
+        );
+        this.registerLoadMoreSuccess(action, actionInput, toolResult, agentConfig, loadedSkillNames);
         logger.info('AgentRuntime', 'Tool executed', { taskId: task.id, toolName: action, result: toolResult.slice(0, 200) });
 
         messages.push({ role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: action, arguments: JSON.stringify(actionInput) } }] } as any);
@@ -261,21 +286,31 @@ export class AgentRuntime extends EventEmitter {
         break;
       }
 
-      const needsReload = this.checkSkillReload(agentConfig.skills, action, loadedSkills);
-      if (needsReload) {
-        const skillDef = this.buildSkillDefinition(needsReload);
-        messages.push({ role: 'system', content: `【Skill Definition】: ${skillDef}` });
-        loadedSkills.add(needsReload.id);
+      if (this.isLoadMoreAction(action)) {
+        logger.debug('AgentRuntime', 'ReAct step', { taskId: task.id, stepIndex, type: 'ACTION', toolName: action });
 
-        const skillToolNames = needsReload.tools.map(t => `skill:${needsReload.name}:${t.name}`);
-        loadedToolNames.push(...skillToolNames);
+        const observation = await this.executeTool(
+          agentConfig.id,
+          action,
+          actionInput,
+          task.id,
+          agentConfig,
+          loadedSkillNames
+        );
+        this.registerLoadMoreSuccess(action, actionInput, observation, agentConfig, loadedSkillNames);
 
-        logger.info('AgentRuntime', 'Skill lazy loaded', {
-          taskId: task.id,
-          skillName: needsReload.name,
-          tools: skillToolNames.join(', ')
-        });
+        const observationStep: ReActStep = {
+          stepIndex: stepIndex++,
+          stepType: 'OBSERVATION',
+          content: observation,
+        };
+        steps.push(observationStep);
+        await this.logStep(task.id, observationStep);
 
+        messages.push({ role: 'assistant', content: thought });
+        messages.push({ role: 'tool', name: action, content: observation });
+
+        await taskOrchestrator.updateTaskHeartbeat(task.id);
         continue;
       }
 
@@ -291,7 +326,15 @@ export class AgentRuntime extends EventEmitter {
 
       logger.debug('AgentRuntime', 'ReAct step', { taskId: task.id, stepIndex, type: 'ACTION', toolName: action });
 
-      const observation = await this.executeTool(agentConfig.id, action, actionInput);
+      const observation = await this.executeTool(
+        agentConfig.id,
+        action,
+        actionInput,
+        task.id,
+        agentConfig,
+        loadedSkillNames
+      );
+      this.registerLoadMoreSuccess(action, actionInput, observation, agentConfig, loadedSkillNames);
 
       const observationStep: ReActStep = {
         stepIndex: stepIndex++,
@@ -314,18 +357,58 @@ export class AgentRuntime extends EventEmitter {
     return steps;
   }
 
+  /**
+   * After successful `load_more` of main SKILL.md (no `reference`), mark skill name as loaded for tool exposure + execution gate.
+   */
+  private registerLoadMoreSuccess(
+    toolName: string,
+    args: Record<string, unknown>,
+    observation: string,
+    agentConfig: AgentConfig,
+    loadedSkillNames: Set<string>
+  ): void {
+    if (toolName !== 'load_more') return;
+    if (observation.startsWith('Error:')) return;
+    const ref = args.reference;
+    if (ref != null && String(ref).trim() !== '') return;
+    const skillName = args.skill_name;
+    if (typeof skillName !== 'string' || !skillName.trim()) return;
+    if (!agentConfig.skills.some((s) => s.name === skillName)) return;
+    loadedSkillNames.add(skillName);
+    logger.info('AgentRuntime', 'Skill marked loaded via load_more', { skillName });
+  }
+
+  /**
+   * LLM tool list = system builtins (always) + SkillToolImpl (`skill:*`) only for skills assigned to this agent
+   * and unlocked this task via successful main SKILL.md `load_more`.
+   */
+  private buildLlmToolDescriptors(agentConfig: AgentConfig, loadedSkillNames: Set<string>) {
+    const builtins = toolHub.listBuiltinTools();
+    const assignedSkillNames = new Set(agentConfig.skills.map((s) => s.name));
+    const skillDescriptors: ToolDescriptor[] = [];
+    for (const td of toolHub.listTools()) {
+      if (!isSkillToolName(td.name)) continue;
+      const m = td.name.match(/^skill:([^:]+):/);
+      if (!m) continue;
+      const skillName = m[1];
+      if (!assignedSkillNames.has(skillName) || !loadedSkillNames.has(skillName)) continue;
+      skillDescriptors.push(td);
+    }
+    return [...builtins, ...skillDescriptors];
+  }
+
   private parseReAct(response: string): { action: string; actionInput: Record<string, unknown> } | null {
     const finalMatch = response.match(/(?:FINISH|Final Answer)[:\s]*(.+)/is);
     if (finalMatch) {
       return { action: 'FINISH', actionInput: { result: finalMatch[1].trim() } };
     }
 
-    const actionMatch = response.match(/Action:\s*(\w+)\s*\(([^)]*)\)/is);
+    const actionMatch = response.match(/Action:\s*([^\n(]+?)\s*\(([^)]*)\)/is);
     if (!actionMatch) {
       return null;
     }
 
-    const action = actionMatch[1].trim();
+    const action = actionMatch[1].trim().replace(/\s+$/, '');
     const argsStr = actionMatch[2].trim();
 
     let actionInput: Record<string, unknown> = {};
@@ -340,29 +423,16 @@ export class AgentRuntime extends EventEmitter {
     return { action, actionInput };
   }
 
-  private checkSkillReload(
-    skills: AgentSkill[],
-    action: string,
-    loadedSkills: Set<string>
-  ): AgentSkill | null {
-    const skillToolMatch = action.match(/^skill:([^:]+):(.+)$/);
-    if (skillToolMatch) {
-      const skillName = skillToolMatch[1];
-      return skills.find(s => s.name === skillName && !loadedSkills.has(s.name)) || null;
-    }
-    return null;
-  }
-
-  private buildSkillDefinition(skill: AgentSkill): string {
-    const toolDefs = skill.tools.map(t => `- ${t.name}: ${t.description}`).join('\n');
-    return `Skill: ${skill.name}\nDescription: ${skill.description}\nTools:\n${toolDefs}`;
+  private isLoadMoreAction(action: string): boolean {
+    return action === 'load_more';
   }
 
   private async callModelWithMessages(
     messages: { role: string; content: string; name?: string }[],
     modelConfig: DbModelConfig,
-    temperature?: number,
-    toolNames: string[] = []
+    temperature: number | undefined,
+    agentConfig: AgentConfig,
+    loadedSkillNames: Set<string>
   ): Promise<{ content: string; toolCall?: { name: string; args: Record<string, unknown> } }> {
     try {
       if (!modelConfig || !modelConfig.modelName) {
@@ -379,16 +449,13 @@ export class AgentRuntime extends EventEmitter {
 
       const effectiveTemperature = temperature ?? modelConfig.temperature;
 
-      const allTools = toolHub.listTools();
-      for (const toolName of allTools) {
-        logger.info('AgentRuntime', 'toolName', { toolName: toolName.name });
-      }
-
-      const toolsParam = allTools.length > 0 ? allTools.map(t => t.jsonSchema as any) : undefined;
-      logger.debug('AgentRuntime', 'LLM tools', { 
-        model: modelConfig.modelName, 
-        toolsCount: allTools.length,
-        toolsParam: toolsParam ? JSON.stringify(toolsParam) : 'undefined',
+      const llmTools = this.buildLlmToolDescriptors(agentConfig, loadedSkillNames);
+      const toolsParam = llmTools.length > 0 ? llmTools.map((t) => t.jsonSchema as any) : undefined;
+      logger.debug('AgentRuntime', 'LLM tools', {
+        model: modelConfig.modelName,
+        toolsCount: llmTools.length,
+        toolNames: llmTools.map((t) => t.jsonSchema),
+        loadedSkillNames: [...loadedSkillNames],
       });
 
       const chatOptions: any = {
@@ -396,18 +463,18 @@ export class AgentRuntime extends EventEmitter {
         messages: messages as any,
         temperature: effectiveTemperature,
       };
-      
+
       if (toolsParam) {
         chatOptions.tools = toolsParam;
         chatOptions.tool_choice = 'auto';
       }
-      
+
       const response = await client.chat.completions.create(chatOptions);
 
       const message = response.choices[0]?.message;
       const finishReason = response.choices[0]?.finish_reason;
       logger.debug('AgentRuntime', 'response info', { model: modelConfig.modelName, finishReason, hasToolCalls: !!message?.tool_calls });
-      
+
       let output = message?.content || '';
       const hasToolCalls = message?.tool_calls && message.tool_calls.length > 0;
       logger.debug('AgentRuntime', 'LLM output', { model: modelConfig.modelName, output, hasToolCalls, toolCallCount: message?.tool_calls?.length || 0 });
@@ -442,13 +509,31 @@ export class AgentRuntime extends EventEmitter {
     }
   }
 
-  private async executeTool(agentId: string, toolName: string, args: Record<string, unknown>): Promise<string> {
+  private async executeTool(
+    agentId: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    taskId: string,
+    agentConfig: AgentConfig,
+    loadedSkillNames: Set<string>
+  ): Promise<string> {
     if (toolName === 'finish') {
       return args.result as string || 'Task completed';
     }
 
+    const skillMatch = toolName.match(/^skill:([^:]+):/);
+    if (skillMatch) {
+      const sName = skillMatch[1];
+      if (!agentConfig.skills.some((s) => s.name === sName)) {
+        return `Error: Skill "${sName}" is not available to this agent.`;
+      }
+      if (!loadedSkillNames.has(sName)) {
+        return `Error: Skill "${sName}" must be loaded with load_more(skill_name="${sName}") (main SKILL.md) before calling skill tools.`;
+      }
+    }
+
     try {
-      const result = await toolHub.execute(agentId, toolName, args);
+      const result = await toolHub.execute(agentId, toolName, args, taskId);
 
       if (result.success) {
         return result.output || 'Tool executed successfully';

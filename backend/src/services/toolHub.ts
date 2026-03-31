@@ -2,15 +2,24 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { securitySandbox, PermissionDeniedError } from './securitySandbox';
+import { authService } from './authService.js';
 import { configManager } from './configManager';
 import { createReadStream } from 'fs';
 import { logger } from './logger.js';
+import { resolveSkillToolHubName } from './skillToolNames.js';
+import { db, schema } from '../db';
+import { eq } from 'drizzle-orm';
 
 export interface ToolDescriptor {
   name: string,
   textSchema: string;
   jsonSchema: Record<string, unknown>;
 };
+
+/** `skill:{skillName}:{toolName}` entries (SkillToolImpl), not system builtins. */
+export function isSkillToolName(name: string): boolean {
+  return name.startsWith('skill:');
+}
 
 export interface ToolResult {
   success: boolean;
@@ -326,16 +335,35 @@ class EditFileTool extends BaseTool {
 
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
     try {
-      const filePath = args.path as string;
-      const createBackup = args.backup as boolean ?? true;
-
-      if (createBackup && fs.existsSync(filePath)) {
-        const backupPath = filePath + '.bak';
-        fs.copyFileSync(filePath, backupPath);
+      const rawPath = args.path as string;
+      if (!rawPath || typeof rawPath !== 'string') {
+        return { success: false, error: '无效的文件路径' };
       }
 
-      fs.writeFileSync(filePath, args.content as string);
-      return { success: true, output: `File edited: ${filePath}` };
+      const workspacePath = configManager.getWorkspacePath();
+      const absPath = path.isAbsolute(rawPath)
+        ? path.normalize(rawPath)
+        : path.join(workspacePath, rawPath);
+      const resolvedPath = path.normalize(absPath);
+
+      if (!resolvedPath.startsWith(workspacePath)) {
+        return { success: false, error: '文件路径必须在工作空间内' };
+      }
+
+      const createBackup = (args.backup as boolean) ?? true;
+
+      if (createBackup && fs.existsSync(resolvedPath)) {
+        const backupPath = resolvedPath + '.bak';
+        fs.copyFileSync(resolvedPath, backupPath);
+      }
+
+      const dir = path.dirname(resolvedPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      fs.writeFileSync(resolvedPath, args.content as string);
+      return { success: true, output: `File edited: ${resolvedPath}` };
     } catch (error) {
       return { success: false, error: String(error) };
     }
@@ -358,6 +386,62 @@ class SystemInfoTool extends BaseTool {
         cwd: process.cwd(),
       }),
     };
+  }
+}
+
+class LoadMoreTool extends BaseTool {
+  name = 'load_more';
+  description = '加载skill完整内容(SKILL.md)或references文档';
+  parameters = {
+    type: 'object',
+    properties: {
+      skill_name: { type: 'string', description: '要加载的skill名称（必填）' },
+      reference: { type: 'string', description: '可选，要加载的references文档名称（不含.md后缀）' },
+    },
+    required: ['skill_name'],
+  };
+
+  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    const skillName = args.skill_name as string;
+    const reference = args.reference as string | undefined;
+
+    if (!skillName) {
+      return { success: false, error: 'skill_name is required' };
+    }
+
+    try {
+      const skill = await db.select()
+        .from(schema.skills)
+        .where(eq(schema.skills.name, skillName));
+
+      if (skill.length === 0) {
+        return { success: false, error: `Skill "${skillName}" not found` };
+      }
+
+      const skillData = skill[0];
+      if (!skillData.rootDir) {
+        return { success: false, error: `Skill "${skillName}" has no root directory` };
+      }
+
+      if (reference) {
+        const refPath = path.join(skillData.rootDir, 'references', `${reference}.md`);
+        if (!fs.existsSync(refPath)) {
+          return { success: false, error: `Reference "${reference}" not found in skill "${skillName}"` };
+        }
+        const content = fs.readFileSync(refPath, 'utf-8');
+        return { success: true, output: content };
+      }
+
+      const skillMdPath = path.join(skillData.rootDir, 'SKILL.md');
+      if (!fs.existsSync(skillMdPath)) {
+        return { success: false, error: `SKILL.md not found for skill "${skillName}"` };
+      }
+
+      const content = fs.readFileSync(skillMdPath, 'utf-8');
+      return { success: true, output: content };
+    } catch (error) {
+      return { success: false, error: `Failed to load: ${String(error)}` };
+    }
   }
 }
 
@@ -423,6 +507,7 @@ export class ToolHub {
     this.register(new ExecShellTool());
     this.register(new HttpRequestTool());
     this.register(new SystemInfoTool());
+    this.register(new LoadMoreTool());
   }
 
   register(tool: BaseTool, customName?: string): void {
@@ -456,6 +541,7 @@ export class ToolHub {
     return this.tools.get(name);
   }
 
+  /** All registered tools, including `skill:*` (SkillToolImpl). */
   listTools(): ToolDescriptor[] {
     return Array.from(this.tools.values()).map(t => ({
       name: t.name,
@@ -464,36 +550,80 @@ export class ToolHub {
     }));
   }
 
-  async execute(agentId: string, toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
-    logger.info('ToolHub', 'execute start', { agentId, toolName, args: JSON.stringify(args) });
+  /**
+   * System builtin tools only (constructor-registered BaseTool + load_more, etc.).
+   * Excludes `skill:*`; those are not “default for every agent” and are exposed to the LLM only after `load_more` in AgentRuntime.
+   */
+  listBuiltinTools(): ToolDescriptor[] {
+    return Array.from(this.tools.values())
+      .filter((t) => !isSkillToolName(t.name))
+      .map((t) => ({
+        name: t.name,
+        textSchema: t.toTextSchema(),
+        jsonSchema: t.toJsonSchema(),
+      }));
+  }
 
-    const permResult = await securitySandbox.intercept(agentId, toolName, args);
-    logger.debug('ToolHub', 'permission check', { toolName, policy: permResult.policy });
+  async execute(agentId: string, toolName: string, args: Record<string, unknown>, taskId?: string): Promise<ToolResult> {
+    const resolvedToolName = isSkillToolName(toolName) ? resolveSkillToolHubName(toolName) : toolName;
+    logger.info('ToolHub', 'execute start', {
+      agentId,
+      toolName,
+      resolvedToolName,
+      taskId,
+      args: JSON.stringify(args),
+    });
+
+    const policyAliases =
+      isSkillToolName(toolName) && toolName !== resolvedToolName ? [toolName] : undefined;
+    const permResult = await securitySandbox.intercept(
+      agentId,
+      resolvedToolName,
+      args,
+      policyAliases
+    );
+    logger.debug('ToolHub', 'permission check', { toolName, resolvedToolName, policy: permResult.policy });
 
     if (permResult.policy === 'DENY') {
-      logger.warn('ToolHub', 'tool denied', { toolName });
-      throw new PermissionDeniedError(`Tool ${toolName} is denied`);
+      logger.warn('ToolHub', 'tool denied', { toolName, resolvedToolName });
+      throw new PermissionDeniedError(`Tool ${resolvedToolName} is denied`);
     }
 
-    if (permResult.policy === 'ASK' && !permResult.requiresUserConfirmation) {
-      logger.warn('ToolHub', 'user confirmation required', { toolName });
-      return { success: false, error: 'User confirmation required' };
+    if (permResult.policy === 'ASK') {
+      try {
+        await authService.waitForAuthorization(agentId, resolvedToolName, args, taskId);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        logger.warn('ToolHub', 'authorization failed', { toolName, resolvedToolName, taskId, error: msg });
+        if (e instanceof PermissionDeniedError) {
+          throw e;
+        }
+        throw new PermissionDeniedError(msg);
+      }
     }
 
-    const tool = this.tools.get(toolName);
+    const tool = this.tools.get(resolvedToolName);
     if (!tool) {
-      logger.error('ToolHub', 'tool not found', { toolName, availableTools: Array.from(this.tools.keys()) });
-      return { success: false, error: `Tool ${toolName} not found` };
+      logger.error('ToolHub', 'tool not found', {
+        toolName,
+        resolvedToolName,
+        availableTools: Array.from(this.tools.keys()),
+      });
+      return { success: false, error: `Tool ${resolvedToolName} not found` };
     }
 
-    if (!securitySandbox.validateToolParams(toolName, args)) {
-      logger.warn('ToolHub', 'invalid params', { toolName });
+    if (!securitySandbox.validateToolParams(resolvedToolName, args)) {
+      logger.warn('ToolHub', 'invalid params', { resolvedToolName });
       return { success: false, error: 'Invalid tool parameters' };
     }
 
-    logger.info('ToolHub', 'executing tool', { toolName, toolDescription: tool.description });
+    logger.info('ToolHub', 'executing tool', { resolvedToolName, toolDescription: tool.description });
     const result = await tool.execute(args);
-    logger.info('ToolHub', 'execute complete', { toolName, success: result.success, output: result.output?.slice(0, 200) });
+    logger.info('ToolHub', 'execute complete', {
+      resolvedToolName,
+      success: result.success,
+      output: result.output?.slice(0, 200),
+    });
 
     return result;
   }

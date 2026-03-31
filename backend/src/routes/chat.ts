@@ -64,10 +64,13 @@ router.get('/export', async (req: Request, res: Response) => {
 
     let content = '';
 
+    const roleLabel = (role: string | null) =>
+      role === 'user' ? 'User' : role === 'system' ? 'System' : 'Assistant';
+
     if (format === 'markdown') {
       for (const msg of filteredHistory) {
         const timestamp = msg.createdAt ? new Date(msg.createdAt).toLocaleString() : 'Unknown';
-        content += `## ${msg.role === 'user' ? 'User' : 'Assistant'} - ${timestamp}\n\n`;
+        content += `## ${roleLabel(msg.role)} - ${timestamp}\n\n`;
         content += `${msg.content}\n\n---\n\n`;
       }
     } else {

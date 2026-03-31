@@ -116,6 +116,15 @@ export const systemApi = {
   getResourceMetrics: () => api.get<ResourceMetrics>('/system/metrics/resources'),
 };
 
+export const authApi = {
+  submitDecision: (body: {
+    authId: string;
+    allow: boolean;
+    persistPolicy?: boolean;
+    policyForAgent?: 'DENY' | 'ASK' | 'ALLOW';
+  }) => api.post('/auth/decision', body),
+};
+
 export const schedulerApi = {
   getJobs: () => api.get<ScheduledJob[]>('/scheduler/jobs'),
   getJob: (id: string) => api.get<ScheduledJob>(`/scheduler/jobs/${id}`),

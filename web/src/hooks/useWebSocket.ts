@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 
 interface WebSocketMessage {
   type: string;
@@ -82,4 +82,38 @@ export function useTaskEvents() {
   }, []);
 
   return { lastMessage };
+}
+
+export interface AuthRequestPayload {
+  authId: string;
+  agentId: string;
+  tool: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  taskId?: string;
+  expiresAt: string;
+}
+
+/**
+ * Dedicated listener: `useTaskEvents` only keeps the last message, which would drop AUTH_REQUEST
+ * if another event arrives before the user acts.
+ */
+export function useAuthRequests(onAuth: (data: AuthRequestPayload) => void) {
+  const ref = useRef(onAuth);
+  ref.current = onAuth;
+
+  useEffect(() => {
+    initWebSocket();
+
+    const handleMessage = (message: WebSocketMessage) => {
+      if (message.type === 'AUTH_REQUEST' && message.data) {
+        ref.current(message.data as AuthRequestPayload);
+      }
+    };
+
+    subscribers.add(handleMessage);
+    return () => {
+      subscribers.delete(handleMessage);
+    };
+  }, []);
 }
