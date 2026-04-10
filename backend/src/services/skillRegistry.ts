@@ -16,6 +16,7 @@ import { OpenAI } from 'openai/client';
 import { modelHub } from './modelHub';
 import { logger } from './logger.js';
 import { normalizeSkillToolLogicalName, skillToolHubKey } from './skillToolNames.js';
+import { getSkillFramework } from './agentBrain/coobotSkillFramework.js';
 
 export interface SkillMeta {
   id: string;
@@ -413,7 +414,7 @@ function resolveEntrypoint(skillDir: string, runtimeLanguage: string | undefined
 
 /**
  * Skill 包声明的工具实现；注册名形如 `skill:{skillName}:{toolName}`。
- * 与构造函数内建 `BaseTool` 不同：仅当 AgentRuntime 判定该 skill 已通过主 `SKILL.md` 的 `load_more` 成功后，才会把对应 descriptor 下发给大模型。
+ * 注册为 `skill:*`，由 AgentBrain 在 ReAct 中调用；加载上下文用框架的 `skill_load_main` 等，而非 ToolHub 重复实现。
  */
 class SkillToolImpl extends BaseTool {
   name: string;
@@ -506,15 +507,72 @@ export class SkillRegistry {
     }
   }
 
+  /**
+   * Installed skills for UI / ToolHub: primary source is `@biosbot/agent-skills` `skills/registry.json`
+   * (via SkillFramework). Rows only in SQLite (e.g. legacy `skillRegistry.install`) are merged in.
+   */
   async listInstalled(): Promise<SkillMeta[]> {
-    const results = await db.select()
+    const byId = new Map<string, SkillMeta>();
+
+    if (fs.existsSync(this.skillsDir)) {
+      try {
+        const framework = getSkillFramework();
+        const { skills: fwSummaries } = framework.listSkills();
+        for (const s of fwSummaries) {
+          let rootPath: string;
+          let entryTools: { name: string; description?: string; parameters?: Record<string, unknown> }[];
+          try {
+            const entry = framework.getSkill(s.name);
+            rootPath = entry.rootPath;
+            entryTools = entry.tools.map((t) => ({
+              name: t.name,
+              description: t.description,
+              parameters: (t.parameters as unknown as Record<string, unknown>) ?? {},
+            }));
+          } catch {
+            logger.warn('SkillRegistry', 'registry.json lists skill but getSkill failed', { name: s.name });
+            continue;
+          }
+          const meta = parseSkillMarkdown(path.join(rootPath, 'SKILL.md'));
+          const detected = detectPackageLanguage(rootPath);
+          const runtimeLanguage = meta.runtime || detected || undefined;
+          const tools = normalizeManifestTools(
+            entryTools.map((t) => ({
+              name: t.name,
+              description: t.description ?? '',
+              parameters: t.parameters ?? {},
+            })),
+            runtimeLanguage ?? null
+          );
+          const id = normalizeSkillId(meta.name);
+          byId.set(id, {
+            id,
+            name: meta.name,
+            description: meta.description || s.description || '',
+            version: meta.version,
+            author: meta.author,
+            runtimeLanguage: runtimeLanguage ?? undefined,
+            tools,
+            configSchema: undefined,
+          });
+        }
+      } catch (e) {
+        logger.warn('SkillRegistry', 'SkillFramework list failed; falling back to DB only', {
+          error: String(e),
+        });
+      }
+    }
+
+    const dbRows = await db
+      .select()
       .from(schema.skills)
       .where(eq(schema.skills.enabled, true));
 
-    return results.map((row) => {
+    for (const row of dbRows) {
+      if (byId.has(row.id)) continue;
       const rawTools: SkillTool[] = row.toolManifestJson ? JSON.parse(row.toolManifestJson) : [];
       const tools = normalizeManifestTools(rawTools, row.runtimeLanguage);
-      return {
+      byId.set(row.id, {
         id: row.id,
         name: row.name,
         description: row.description,
@@ -523,8 +581,70 @@ export class SkillRegistry {
         runtimeLanguage: row.runtimeLanguage || undefined,
         tools,
         configSchema: row.configSchemaJson ? JSON.parse(row.configSchemaJson) : undefined,
-      };
-    });
+      });
+    }
+
+    return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+  }
+
+  /**
+   * Ensure a `skills` table row exists for this id (normalized from SKILL.md name), so agent binding
+   * and tool permissions can use DB joins. No-op if already present.
+   */
+  async ensureSkillPersisted(skillId: string): Promise<void> {
+    const existing = await db
+      .select({ id: schema.skills.id })
+      .from(schema.skills)
+      .where(eq(schema.skills.id, skillId));
+    if (existing.length > 0) return;
+    if (!fs.existsSync(this.skillsDir)) return;
+
+    let framework: ReturnType<typeof getSkillFramework>;
+    try {
+      framework = getSkillFramework();
+    } catch (e) {
+      logger.warn('SkillRegistry', 'ensureSkillPersisted: no framework', { skillId, error: String(e) });
+      return;
+    }
+
+    const { skills: fwSummaries } = framework.listSkills();
+    for (const s of fwSummaries) {
+      if (normalizeSkillId(s.name) !== skillId) continue;
+      let entry: { rootPath: string; tools: { name: string; description?: string; parameters?: unknown }[] };
+      try {
+        entry = framework.getSkill(s.name) as typeof entry;
+      } catch {
+        return;
+      }
+      const meta = parseSkillMarkdown(path.join(entry.rootPath, 'SKILL.md'));
+      const detected = detectPackageLanguage(entry.rootPath);
+      const finalRuntime = meta.runtime || detected || null;
+      const toolManifest = entry.tools.map((t) => ({
+        name: t.name,
+        description: t.description ?? '',
+        parameters: t.parameters,
+      }));
+
+      await db.insert(schema.skills).values({
+        id: skillId,
+        name: meta.name,
+        description: meta.description,
+        version: meta.version ?? null,
+        author: meta.author ?? null,
+        runtimeLanguage: finalRuntime,
+        detectedLanguage: detected,
+        installMode: finalRuntime ? 'managed' : 'copy_only',
+        rootDir: entry.rootPath,
+        entrypoint: resolveEntrypoint(entry.rootPath, finalRuntime || undefined),
+        toolManifestJson: JSON.stringify(toolManifest),
+        compatibility: meta.compatibility ?? null,
+        installedAt: new Date(),
+        updatedAt: new Date(),
+        enabled: true,
+      });
+      logger.info('SkillRegistry', 'Synced framework skill into DB', { skillId, name: meta.name });
+      return;
+    }
   }
 
   async findInstalledByName(name: string): Promise<typeof schema.skills.$inferSelect | null> {

@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { skillRegistry, findSkillRoot } from '../services/skillRegistry.js';
 import { configManager } from '../services/configManager.js';
+import { resetSkillFrameworkSingleton } from '../services/agentBrain/coobotSkillFramework.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -14,8 +15,12 @@ function isSafePreviewId(id: unknown): id is string {
   );
 }
 
-router.get('/', async (_req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
+    const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+    if (refresh) {
+      resetSkillFrameworkSingleton();
+    }
     const skills = await skillRegistry.listInstalled();
     res.json(skills);
   } catch (error) {

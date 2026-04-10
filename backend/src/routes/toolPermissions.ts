@@ -8,6 +8,7 @@ import {
 } from '../services/builtinToolPolicies.js';
 import { persistAgentToolPolicy } from '../services/agentToolPermissionPersistence.js';
 import { skillToolHubKey } from '../services/skillToolNames.js';
+import { skillRegistry } from '../services/skillRegistry.js';
 
 const router = Router();
 
@@ -29,6 +30,7 @@ router.get('/:agentId', async (req: Request, res: Response) => {
       .where(eq(schema.agentSkills.agentId, req.params.agentId as string));
     
     for (const agentSkill of agentSkillsList) {
+      await skillRegistry.ensureSkillPersisted(agentSkill.skillId);
       const skillData = await db.select()
         .from(schema.skills)
         .where(eq(schema.skills.id, agentSkill.skillId));

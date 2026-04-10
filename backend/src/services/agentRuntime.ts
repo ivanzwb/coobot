@@ -8,7 +8,13 @@ import { taskOrchestrator } from './taskOrchestrator';
 import { eventBus } from './eventBus.js';
 import { logger } from './logger.js';
 import { configManager } from './configManager.js';
-import { AgentBrain, TaskStatus, StepPhase, type PermissionRequest } from '@biosbot/agent-brain';
+import {
+  AgentBrain,
+  TaskStatus,
+  StepPhase,
+  TerminationReason,
+  type PermissionRequest,
+} from '@biosbot/agent-brain';
 import {
   coobotBrainSession,
   ensureAgentMemory,
@@ -253,7 +259,20 @@ export class AgentRuntime extends EventEmitter {
 
       const result = await brain.run(`User request:\n${userRequest}`);
 
-      const finalOutput = result.finalAnswer ?? '';
+      let finalOutput = (result.finalAnswer ?? '').trim();
+      if (!finalOutput) {
+        if (result.terminationReason && result.terminationReason !== TerminationReason.COMPLETED) {
+          finalOutput = `（任务结束：${result.terminationReason}）`;
+        } else {
+          finalOutput =
+            '（本次运行未产生可见正文回复。请打开「任务详情」查看各步思考与工具输出。）';
+        }
+        logger.warn('AgentRuntime', 'Brain run: finalAnswer still empty after ReactLoop fix', {
+          taskId: task.id,
+          status: result.status,
+          stepCount: result.steps?.length ?? 0,
+        });
+      }
       await memoryEngine.appendMessage('assistant', finalOutput, [], task.id);
 
       const status =

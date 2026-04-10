@@ -38,7 +38,7 @@ index 0e7b599..f7655e2 100644
          this.innateToolHub.register(new memory_tools_1.ConversationTrackTool(this.memory));
          this.innateToolHub.register(new memory_tools_1.ConversationSearchTool(this.memory));
 diff --git a/node_modules/@biosbot/agent-brain/dist/react/react-loop.js b/node_modules/@biosbot/agent-brain/dist/react/react-loop.js
-index 853f14c..496183f 100644
+index 853f14c..ae5658c 100644
 --- a/node_modules/@biosbot/agent-brain/dist/react/react-loop.js
 +++ b/node_modules/@biosbot/agent-brain/dist/react/react-loop.js
 @@ -157,10 +157,11 @@ class ReactLoop {
@@ -84,6 +84,48 @@ index 853f14c..496183f 100644
          });
          if (!decision.allowed) {
              return JSON.stringify({ status: 'denied', tool: toolName, target, reason: decision.reason });
+@@ -326,13 +338,40 @@ class ReactLoop {
+             timestamp: Date.now(),
+         };
+     }
++    /**
++     * When a plan step ends without a tool-less final response (e.g. max steps), `output` is unset
++     * but the last THOUGHT/OBSERVATION still holds the model-visible answer — use it as finalAnswer.
++     */
++    inferFinalAnswerFromSteps(steps) {
++        for (let i = steps.length - 1; i >= 0; i--) {
++            const s = steps[i];
++            if (s.phase === types_1.StepPhase.THOUGHT) {
++                const c = String(s.content ?? '').trim();
++                if (c && !c.startsWith('[Model Error]'))
++                    return s.content;
++            }
++        }
++        for (let i = steps.length - 1; i >= 0; i--) {
++            const s = steps[i];
++            if (s.phase === types_1.StepPhase.OBSERVATION) {
++                const c = String(s.content ?? '').trim();
++                if (c)
++                    return s.content;
++            }
++        }
++        return undefined;
++    }
+     buildResult(steps, planStepResults, reason, finalAnswer) {
++        let resolved = finalAnswer;
++        if (typeof resolved !== 'string' || !resolved.trim()) {
++            resolved = this.inferFinalAnswerFromSteps(steps);
++        }
+         const status = reason === types_1.TerminationReason.COMPLETED
+             ? types_1.TaskStatus.COMPLETED
+             : reason === types_1.TerminationReason.USER_TERMINATED
+                 ? types_1.TaskStatus.TERMINATED
+                 : types_1.TaskStatus.FAILED;
+-        return { status, finalAnswer, steps, planStepResults, terminationReason: reason };
++        return { status, finalAnswer: resolved, steps, planStepResults, terminationReason: reason };
+     }
+ }
+ exports.ReactLoop = ReactLoop;
 diff --git a/node_modules/@biosbot/agent-brain/dist/sandbox/security-sandbox.d.ts b/node_modules/@biosbot/agent-brain/dist/sandbox/security-sandbox.d.ts
 index a4950e4..42703bb 100644
 --- a/node_modules/@biosbot/agent-brain/dist/sandbox/security-sandbox.d.ts

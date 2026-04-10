@@ -1,20 +1,18 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import { exec } from 'child_process';
 import { securitySandbox, PermissionDeniedError } from './securitySandbox';
 import { authService } from './authService.js';
-import { configManager } from './configManager';
-import { createReadStream } from 'fs';
 import { logger } from './logger.js';
 import { resolveSkillToolHubName } from './skillToolNames.js';
-import { db, schema } from '../db';
-import { eq } from 'drizzle-orm';
+import {
+  BUILTIN_TOOL_DESCRIPTIONS,
+  BUILTIN_TOOL_NAMES,
+  type BuiltinToolName,
+} from './builtinToolPolicies.js';
 
 export interface ToolDescriptor {
-  name: string,
+  name: string;
   textSchema: string;
   jsonSchema: Record<string, unknown>;
-};
+}
 
 /** `skill:{skillName}:{toolName}` entries (SkillToolImpl), not system builtins. */
 export function isSkillToolName(name: string): boolean {
@@ -47,8 +45,10 @@ export abstract class BaseTool {
 
   toTextSchema(): string {
     const parametersText = Object.entries((this.parameters.properties as Record<string, any>) || {})
-      .map(([key, prop]) => `
-    - ${key} (${(prop as any).type}, ${(this.parameters.required as string[]).includes(key) ? 'Required' : 'Optional'}): ${(prop as any).description}}`)
+      .map(
+        ([key, prop]) => `
+    - ${key} (${(prop as any).type}, ${(this.parameters.required as string[]).includes(key) ? 'Required' : 'Optional'}): ${(prop as any).description}}`
+      )
       .join('\n');
     return `
 [${this.name}]:
@@ -59,456 +59,35 @@ ${parametersText}
   }
 }
 
-class ListDirectoryTool extends BaseTool {
-  name = 'list_directory';
-  description = '列出目录内容';
-  parameters = {
+function builtinDescriptor(name: BuiltinToolName): ToolDescriptor {
+  const description = BUILTIN_TOOL_DESCRIPTIONS[name];
+  const parameters = {
     type: 'object',
-    properties: {
-      path: { type: 'string', description: '目录路径，默认为工作空间根目录' },
-    },
+    properties: {},
     required: [] as string[],
   };
-
-  async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    try {
-      let dirPath = args.path as string;
-      const workspacePath = configManager.getWorkspacePath();
-      if (!dirPath || typeof dirPath !== 'string') {
-        dirPath = workspacePath;
-      }
-
-      const resolvedPath = path.resolve(dirPath);
-      if (!resolvedPath.startsWith(workspacePath)) {
-        return { success: false, error: '目录路径必须在工作空间内' };
-      }
-
-      if (!fs.existsSync(resolvedPath)) {
-        return { success: false, error: '目录不存在' };
-      }
-
-      const stats = fs.statSync(resolvedPath);
-      if (!stats.isDirectory()) {
-        return { success: false, error: '路径不是目录' };
-      }
-
-      const items = fs.readdirSync(resolvedPath);
-      const detailedItems = items.map(name => {
-        const itemPath = path.join(resolvedPath, name);
-        const itemStats = fs.statSync(itemPath);
-        return {
-          name,
-          type: itemStats.isDirectory() ? 'directory' : 'file',
-          size: itemStats.size,
-          modified: itemStats.mtime.toISOString(),
-        };
-      });
-
-      return { success: true, output: JSON.stringify(detailedItems, null, 2) };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  }
-}
-
-const ALLOWED_EXTENSIONS = ['.txt', '.md', '.json', '.js', '.ts', '.html', '.css', '.xml', '.yaml', '.yml', '.log', '.csv'];
-
-const FORBIDDEN_COMMANDS = ['rm -rf', 'rm -r', 'rm', 'mkfs', 'dd', 'format', '&&', '||', ';', '|'];
-
-interface ReadFileArgs {
-  path: string;
-  line_index?: number;
-  column_index?: number;
-  length?: number;
-}
-
-class FileReadTool extends BaseTool {
-  name = 'read_file';
-  description = '读取本地文件内容, 支持指定起始行列和读取长度';
-  parameters = {
-    type: 'object',
-    properties: {
-      path: { type: 'string', description: '文件绝对路径, 默认为工作空间根目录' },
-      line_index: { type: 'integer', description: '起始行号，从 0 开始, default: 0' },
-      column_index: { type: 'integer', description: '起始列号，从 0 开始, default: 0' },
-      length: { type: 'integer', description: '读取长度（字符数）, default: 100' },
+  return {
+    name,
+    textSchema: `[${name}]:\n  Description: ${description}\n  (执行由 AgentBrain 内置工具完成；此处仅为权限与能力展示用的逻辑名。)\n  Parameters:\n`,
+    jsonSchema: {
+      type: 'function',
+      function: {
+        name,
+        description,
+        parameters,
+      },
     },
-    required: [],
   };
-
-  async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    const readArgs = args as unknown as ReadFileArgs;
-    const workspacePath = configManager.getWorkspacePath();
-    const filePath = readArgs.path ?? workspacePath;
-    if (typeof filePath !== 'string') {
-      return { success: false, error: '无效的文件路径' };
-    }
-
-    const resolvedPath = path.resolve(filePath);
-
-    if (!resolvedPath.startsWith(workspacePath)) {
-      return { success: false, error: '文件路径必须在工作空间内' };
-    }
-
-    if (!fs.existsSync(resolvedPath)) {
-      return { success: false, error: '文件不存在' };
-    }
-
-    const stats = fs.statSync(resolvedPath);
-    if (stats.isDirectory()) {
-      return { success: false, error: '路径是目录，不能读取' };
-    }
-
-    const ext = path.extname(resolvedPath).toLowerCase();
-    if (!ALLOWED_EXTENSIONS.includes(ext)) {
-      return { success: false, error: `不支持读取 ${ext} 类型文件` };
-    }
-
-    const lineIndex = readArgs.line_index ?? 0;
-    const columnIndex = readArgs.column_index ?? 0;
-    const charLength = readArgs.length ?? 100;
-
-    if (lineIndex < 0 || columnIndex < 0 || charLength <= 0) {
-      return { success: false, error: '无效的读取参数' };
-    }
-
-    try {
-      const content = await this.readFileByPosition(resolvedPath, lineIndex, columnIndex, charLength);
-      return { success: true, output: content };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  }
-
-  private readFileByPosition(filePath: string, targetLine: number, targetColumn: number, charLength: number): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const stream = createReadStream(filePath, {
-        encoding: 'utf8',
-        highWaterMark: 1024,
-      });
-
-      let currentLine = 0;
-      let currentColumn = 0;
-      let started = false;
-      let collected = 0;
-      let result = '';
-
-      stream.on('data', (chunk: string | Buffer) => {
-        const str = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-        for (let i = 0; i < str.length; i++) {
-          const ch = str[i];
-
-          if (ch === '\n') {
-            if (started && collected < charLength) {
-              result += ch;
-              collected++;
-              if (collected >= charLength) {
-                stream.destroy();
-                break;
-              }
-            }
-            currentLine++;
-            currentColumn = 0;
-            continue;
-          }
-
-          if (!started) {
-            if (currentLine > targetLine || (currentLine === targetLine && currentColumn >= targetColumn)) {
-              started = true;
-            }
-          }
-
-          if (started && collected < charLength) {
-            result += ch;
-            collected++;
-            if (collected >= charLength) {
-              stream.destroy();
-              break;
-            }
-          }
-
-          currentColumn++;
-        }
-      });
-
-      stream.on('end', () => {
-        resolve(result);
-      });
-
-      stream.on('error', (err) => {
-        reject(err);
-      });
-    });
-  }
 }
 
-class FileWriteTool extends BaseTool {
-  name = 'write_file';
-  description = '写入内容到本地文件';
-  parameters = {
-    path: { type: 'string', required: true, description: '要写入的文件路径' },
-    content: { type: 'string', required: true, description: '要写入的内容' },
-  };
-
-  async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    try {
-      const filePath = args.path as string;
-      const content = args.content as string;
-
-      if (!filePath || typeof filePath !== 'string') {
-        return { success: false, error: '无效的文件路径' };
-      }
-
-      const workspacePath = configManager.getWorkspacePath();
-      const resolvedPath = path.resolve(filePath);
-
-      if (!resolvedPath.startsWith(workspacePath)) {
-        return { success: false, error: '文件路径必须在工作空间内' };
-      }
-
-      const dir = path.dirname(resolvedPath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-
-      fs.writeFileSync(resolvedPath, content);
-      return { success: true, output: `文件已写入: ${resolvedPath}` };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  }
-}
-
-class ExecShellTool extends BaseTool {
-  name = 'exec_shell';
-  description = '执行 Shell 命令';
-  parameters = {
-    command: { type: 'string', required: true, description: '要执行的 Shell 命令' },
-  };
-
-  private validateCommand(command: string): boolean {
-    const lower = command.toLowerCase();
-    return !FORBIDDEN_COMMANDS.some(fc => lower.includes(fc.toLowerCase()));
-  }
-
-  async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    try {
-      const command = args.command as string;
-
-      if (!command || typeof command !== 'string') {
-        return { success: false, error: '无效的命令' };
-      }
-
-      if (!this.validateCommand(command)) {
-        return { success: false, error: '命令包含禁止的操作' };
-      }
-
-      const workspacePath = configManager.getWorkspacePath();
-
-      return new Promise((resolve) => {
-        exec(command, { cwd: workspacePath, timeout: 30000 }, (error, stdout, stderr) => {
-          if (error) {
-            resolve({ success: false, error: stderr || String(error) });
-          } else {
-            resolve({ success: true, output: stdout });
-          }
-        });
-      });
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  }
-}
-
-class EditFileTool extends BaseTool {
-  name = 'edit_file';
-  description = 'Edit content of a local file';
-  parameters = {
-    type: 'object',
-    properties: {
-      path: { type: 'string', description: 'File path to edit' },
-      content: { type: 'string', description: 'New content to write' },
-      backup: { type: 'boolean', description: 'Create backup before editing, default true' },
-    },
-    required: ['path', 'content'],
-  };
-
-  async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    try {
-      const rawPath = args.path as string;
-      if (!rawPath || typeof rawPath !== 'string') {
-        return { success: false, error: '无效的文件路径' };
-      }
-
-      const workspacePath = configManager.getWorkspacePath();
-      const absPath = path.isAbsolute(rawPath)
-        ? path.normalize(rawPath)
-        : path.join(workspacePath, rawPath);
-      const resolvedPath = path.normalize(absPath);
-
-      if (!resolvedPath.startsWith(workspacePath)) {
-        return { success: false, error: '文件路径必须在工作空间内' };
-      }
-
-      const createBackup = (args.backup as boolean) ?? true;
-
-      if (createBackup && fs.existsSync(resolvedPath)) {
-        const backupPath = resolvedPath + '.bak';
-        fs.copyFileSync(resolvedPath, backupPath);
-      }
-
-      const dir = path.dirname(resolvedPath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-
-      fs.writeFileSync(resolvedPath, args.content as string);
-      return { success: true, output: `File edited: ${resolvedPath}` };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  }
-}
-
-class SystemInfoTool extends BaseTool {
-  name = 'system_info';
-  description = 'Get system information';
-  parameters = {};
-
-  async execute(_args: Record<string, unknown>): Promise<ToolResult> {
-    return {
-      success: true,
-      output: JSON.stringify({
-        platform: process.platform,
-        arch: process.arch,
-        nodeVersion: process.version,
-        memory: process.memoryUsage(),
-        cwd: process.cwd(),
-      }),
-    };
-  }
-}
-
-class LoadMoreTool extends BaseTool {
-  name = 'load_more';
-  description = '加载skill完整内容(SKILL.md)或references文档';
-  parameters = {
-    type: 'object',
-    properties: {
-      skill_name: { type: 'string', description: '要加载的skill名称（必填）' },
-      reference: { type: 'string', description: '可选，要加载的references文档名称（不含.md后缀）' },
-    },
-    required: ['skill_name'],
-  };
-
-  async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    const skillName = args.skill_name as string;
-    const reference = args.reference as string | undefined;
-
-    if (!skillName) {
-      return { success: false, error: 'skill_name is required' };
-    }
-
-    try {
-      const skill = await db.select()
-        .from(schema.skills)
-        .where(eq(schema.skills.name, skillName));
-
-      if (skill.length === 0) {
-        return { success: false, error: `Skill "${skillName}" not found` };
-      }
-
-      const skillData = skill[0];
-      if (!skillData.rootDir) {
-        return { success: false, error: `Skill "${skillName}" has no root directory` };
-      }
-
-      if (reference) {
-        const refPath = path.join(skillData.rootDir, 'references', `${reference}.md`);
-        if (!fs.existsSync(refPath)) {
-          return { success: false, error: `Reference "${reference}" not found in skill "${skillName}"` };
-        }
-        const content = fs.readFileSync(refPath, 'utf-8');
-        return { success: true, output: content };
-      }
-
-      const skillMdPath = path.join(skillData.rootDir, 'SKILL.md');
-      if (!fs.existsSync(skillMdPath)) {
-        return { success: false, error: `SKILL.md not found for skill "${skillName}"` };
-      }
-
-      const content = fs.readFileSync(skillMdPath, 'utf-8');
-      return { success: true, output: content };
-    } catch (error) {
-      return { success: false, error: `Failed to load: ${String(error)}` };
-    }
-  }
-}
-
-const ALLOWED_DOMAINS = ['localhost', '127.0.0.1'];
-
-class HttpRequestTool extends BaseTool {
-  name = 'http_request';
-  description = '发送 HTTP 请求';
-  parameters = {
-    type: 'object',
-    properties: {
-      url: { type: 'string', description: '请求 URL' },
-      method: { type: 'string', description: 'HTTP 方法 (GET, POST, PUT, DELETE), default GET' },
-      headers: { type: 'object', description: '请求头' },
-      body: { type: 'string', description: '请求体' },
-    },
-    required: ['url'],
-  };
-
-  private validateUrl(url: string): boolean {
-    try {
-      const parsed = new URL(url);
-      return ALLOWED_DOMAINS.some(d => parsed.hostname.includes(d));
-    } catch {
-      return false;
-    }
-  }
-
-  async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    try {
-      const url = args.url as string;
-
-      if (!url || typeof url !== 'string') {
-        return { success: false, error: '无效的 URL' };
-      }
-
-      if (!this.validateUrl(url)) {
-        return { success: false, error: 'URL 域名不在允许列表中' };
-      }
-
-      const response = await fetch(url, {
-        method: (args.method as string) || 'GET',
-        headers: args.headers as Record<string, string>,
-        body: args.body as string,
-      });
-
-      const text = await response.text();
-      return { success: true, output: text };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  }
-}
-
+/**
+ * Hub 仅注册 `skill:*` 工具实现；与文件/网络/Shell 等重叠的内置能力由 @biosbot/agent-brain
+ * innate 工具执行，Coobot 用 `read_file`、`http_request` 等键做 securitySandbox 权限对齐。
+ */
 export class ToolHub {
   private tools: Map<string, BaseTool> = new Map();
 
-  constructor() {
-    this.register(new FileReadTool());
-    this.register(new FileWriteTool());
-    this.register(new EditFileTool());
-    this.register(new ListDirectoryTool());
-    this.register(new ExecShellTool());
-    this.register(new HttpRequestTool());
-    this.register(new SystemInfoTool());
-    this.register(new LoadMoreTool());
-  }
+  constructor() {}
 
   register(tool: BaseTool, customName?: string): void {
     const name = customName || tool.name;
@@ -541,27 +120,22 @@ export class ToolHub {
     return this.tools.get(name);
   }
 
-  /** All registered tools, including `skill:*` (SkillToolImpl). */
+  /** 内置逻辑名（权限键）+ 已注册的 `skill:*` */
   listTools(): ToolDescriptor[] {
-    return Array.from(this.tools.values()).map(t => ({
+    const builtins = (BUILTIN_TOOL_NAMES as readonly BuiltinToolName[]).map((n) => builtinDescriptor(n));
+    const skills = Array.from(this.tools.values()).map((t) => ({
       name: t.name,
       textSchema: t.toTextSchema(),
-      jsonSchema: t.toJsonSchema()
+      jsonSchema: t.toJsonSchema(),
     }));
+    return [...builtins, ...skills];
   }
 
   /**
-   * System builtin tools only (constructor-registered BaseTool + load_more, etc.).
-   * Excludes `skill:*`; those are not “default for every agent” and are exposed to the LLM only after `load_more` in AgentRuntime.
+   * 与 AgentBrain 权限桥接一致的内置名（无 ToolHub 执行体，仅列表/策略用）。
    */
   listBuiltinTools(): ToolDescriptor[] {
-    return Array.from(this.tools.values())
-      .filter((t) => !isSkillToolName(t.name))
-      .map((t) => ({
-        name: t.name,
-        textSchema: t.toTextSchema(),
-        jsonSchema: t.toJsonSchema(),
-      }));
+    return (BUILTIN_TOOL_NAMES as readonly BuiltinToolName[]).map((n) => builtinDescriptor(n));
   }
 
   async execute(agentId: string, toolName: string, args: Record<string, unknown>, taskId?: string): Promise<ToolResult> {
@@ -576,12 +150,7 @@ export class ToolHub {
 
     const policyAliases =
       isSkillToolName(toolName) && toolName !== resolvedToolName ? [toolName] : undefined;
-    const permResult = await securitySandbox.intercept(
-      agentId,
-      resolvedToolName,
-      args,
-      policyAliases
-    );
+    const permResult = await securitySandbox.intercept(agentId, resolvedToolName, args, policyAliases);
     logger.debug('ToolHub', 'permission check', { toolName, resolvedToolName, policy: permResult.policy });
 
     if (permResult.policy === 'DENY') {
@@ -604,12 +173,15 @@ export class ToolHub {
 
     const tool = this.tools.get(resolvedToolName);
     if (!tool) {
-      logger.error('ToolHub', 'tool not found', {
+      logger.error('ToolHub', 'tool not found (builtins run in AgentBrain, not ToolHub)', {
         toolName,
         resolvedToolName,
         availableTools: Array.from(this.tools.keys()),
       });
-      return { success: false, error: `Tool ${resolvedToolName} not found` };
+      return {
+        success: false,
+        error: `Tool ${resolvedToolName} has no ToolHub executor (use AgentBrain innate tools).`,
+      };
     }
 
     if (!securitySandbox.validateToolParams(resolvedToolName, args)) {

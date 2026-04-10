@@ -2,14 +2,14 @@ import { Router, Request, Response } from 'express';
 import { db, schema } from '../db/index.js';
 import { eq, and } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { agentCapabilityRegistry, toolHub, knowledgeEngine } from '../services/index.js';
+import { agentCapabilityRegistry, toolHub, knowledgeEngine, skillRegistry } from '../services/index.js';
 import { getSkillNamesByAgentIds, getSkillNamesForAgent } from '../db/agentSkillQueries.js';
 import { persistAgentToolPolicy } from '../services/agentToolPermissionPersistence.js';
 import { ensureAgentSkillToolPermissions } from '../services/ensureAgentSkillToolPermissions.js';
 
 const router = Router();
 
-/** API: system builtins only; skill tools are bound via agent_skills and exposed to LLM only after load_more. */
+/** API: builtin names align with AgentBrain→sandbox permission keys; skill tools via agent_skills / AgentBrain. */
 function builtinToolNames(): string[] {
   return toolHub.listBuiltinTools().map((t) => t.name);
 }
@@ -254,6 +254,8 @@ router.post('/:id/skills', async (req: Request, res: Response) => {
   try {
     const { skillId, config } = req.body;
     const agentId = req.params.id as string;
+
+    await skillRegistry.ensureSkillPersisted(skillId as string);
 
     await db.insert(schema.agentSkills).values({
       agentId,

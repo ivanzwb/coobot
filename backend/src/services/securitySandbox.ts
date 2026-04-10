@@ -1,3 +1,18 @@
+/**
+ * 宿主工具策略（历史类名 `SecuritySandbox`），与 `@biosbot/agent-brain` 包内的 **SecuritySandbox** 是两层不同职责：
+ *
+ * | 层级 | 位置 | 作用 |
+ * |------|------|------|
+ * | Brain 内建 | `agent-brain` → `sandbox/security-sandbox.js` | `rules` + `defaultPermission`；`checkPermission` 在 ASK 时调 `askHandler`；`resolvePath`、按 action/target 做粗粒度放行。 |
+ * | 宿主（本文件） | `agentRuntime` 在 `sandbox.askHandler` 里调用 `intercept` | SQLite `agent_tool_permissions`、工作区路径校验、`skill:*` 键与 DB 对齐、HTTP 审批走 `authService`。 |
+ *
+ * **何时改 agent-brain patch**（`patches/@biosbot+agent-brain+0.1.0.patch`，改完后 `npx patch-package @biosbot/agent-brain`）：
+ * - `PermissionRequest` 需要新字段（已有 `toolName` 补丁）或传入 `agentId` / `taskId` 等上下文；
+ * - `checkPermission` 前后要加钩子、或与宿主策略合并的顺序要变；
+ * - `react-loop` 里 sandbox 调用点、innate/skill 工具名解析等与 ReAct 强耦合的逻辑。
+ *
+ * **何时只改本文件**：DB 模型、权限候选展开、默认策略、与 ToolHub / UI 审批协议的映射（`brainToolPermissionBridge`）。
+ */
 import * as path from 'path';
 import { db, schema } from '../db';
 import { and, eq } from 'drizzle-orm';
@@ -15,11 +30,10 @@ export class SecuritySandbox {
     'C:\\System32',
   ];
 
-  /** 表无记录时使用：内置 7 项来自代码；其余工具同策略。 */
+  /** 表无记录时使用：Hub 权限键 + Brain 额外 innate 名。 */
   private defaultToolPolicies: Record<string, ToolPolicy> = {
     ...DEFAULT_BUILTIN_TOOL_POLICIES,
     ...DEFAULT_BRAIN_INNATE_TOOL_POLICIES,
-    load_more: 'ALLOW',
   };
 
   /**
