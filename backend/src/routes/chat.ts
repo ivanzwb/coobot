@@ -1,7 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { memoryEngine, taskOrchestrator, leaderAgent, logger } from '../services/index.js';
-import { db, schema } from '../db/index.js';
-import { eq } from 'drizzle-orm';
+import { memoryEngine, taskOrchestrator, logger } from '../services/index.js';
 
 const router = Router();
 
@@ -33,8 +31,8 @@ router.get('/', async (req: Request, res: Response) => {
     const limit = parseInt(req.query.limit as string) || 50;
     const offset = parseInt(req.query.offset as string) || 0;
 
-    const history = await memoryEngine.getAllHistory(limit, offset);
-    
+    const history = await memoryEngine.getRecentChatHistory(limit, offset);
+
     const messages = history.map(msg => ({
       id: msg.id,
       role: msg.role,
@@ -56,10 +54,10 @@ router.get('/export', async (req: Request, res: Response) => {
     const format = req.query.format as 'markdown' | 'txt' || 'markdown';
     const includeArchived = req.query.includeArchived === 'true';
 
-    const history = await memoryEngine.getAllHistory(1000, 0);
+    const history = await memoryEngine.getAllSessionMessagesChronological();
 
-    const filteredHistory = includeArchived 
-      ? history 
+    const filteredHistory = includeArchived
+      ? history
       : history.filter(h => !h.isArchived);
 
     let content = '';
@@ -91,7 +89,7 @@ router.get('/export', async (req: Request, res: Response) => {
 router.post('/session-boundary', async (req: Request, res: Response) => {
   try {
     const boundary = req.body.boundary || '--- 新话题 ---';
-    
+
     await memoryEngine.appendMessage('system', boundary, []);
 
     res.json({ success: true, boundary });

@@ -69,6 +69,7 @@ export class LeaderAgent extends EventEmitter {
 
       if (taskAnalysis.confidenceScore < DEFAULT_CONFIDENCE_THRESHOLD || taskAnalysis.subtasks.length === 0) {
         const questions = taskAnalysis.clarificationQuestions || ['请提供更多信息以便我更好地理解您的需求'];
+        await taskOrchestrator.mergeInputPayloadFields(task.id, { clarificationQuestions: questions });
         const systemText =
           '需要您补充以下信息后再继续处理（可直接在下方输入框回复）：\n\n' +
           questions.map((q, i) => `${i + 1}. ${q}`).join('\n');

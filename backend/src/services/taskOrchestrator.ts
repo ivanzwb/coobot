@@ -560,6 +560,27 @@ export class TaskOrchestrator extends EventEmitter {
     }
   }
 
+  /** Merge fields into task `inputPayload` JSON (DB + in-memory queue). */
+  async mergeInputPayloadFields(taskId: string, fields: Record<string, unknown>): Promise<void> {
+    const task = await this.getTask(taskId);
+    if (!task) {
+      logger.warn('TaskOrchestrator', 'mergeInputPayloadFields: task not found', { taskId });
+      return;
+    }
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
+    } catch {
+      payload = {};
+    }
+    Object.assign(payload, fields);
+    const json = JSON.stringify(payload);
+    await db.update(schema.tasks)
+      .set({ inputPayload: json, updatedAt: new Date() })
+      .where(eq(schema.tasks.id, taskId));
+    this.patchTaskInputPayload(taskId, json);
+  }
+
   async getTask(taskId: string): Promise<Task | undefined> {
     return this.taskQueue.get(taskId) || (await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)))[0];
   }

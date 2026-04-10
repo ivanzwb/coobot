@@ -1,0 +1,117 @@
+diff --git a/node_modules/@biosbot/agent-memory/dist/embedding/local.js b/node_modules/@biosbot/agent-memory/dist/embedding/local.js
+index 17ea9a4..b741fc5 100644
+--- a/node_modules/@biosbot/agent-memory/dist/embedding/local.js
++++ b/node_modules/@biosbot/agent-memory/dist/embedding/local.js
+@@ -40,14 +40,20 @@ const fs = __importStar(require("fs"));
+ const http = __importStar(require("http"));
+ const tls = __importStar(require("tls"));
+ let proxyConfigured = false;
+-function configureProxy() {
++function resolveProxyUrl(explicit) {
++    if (explicit != null && String(explicit).trim() !== '') {
++        return String(explicit).trim();
++    }
++    return (process.env.HTTPS_PROXY ||
++        process.env.https_proxy ||
++        process.env.HTTP_PROXY ||
++        process.env.http_proxy);
++}
++function configureProxy(explicitProxyUrl) {
+     if (proxyConfigured)
+         return;
+     proxyConfigured = true;
+-    const proxyUrl = process.env.HTTPS_PROXY ||
+-        process.env.https_proxy ||
+-        process.env.HTTP_PROXY ||
+-        process.env.http_proxy;
++    const proxyUrl = resolveProxyUrl(explicitProxyUrl);
+     if (!proxyUrl)
+         return;
+     const proxy = new URL(proxyUrl);
+@@ -150,9 +156,11 @@ class LocalEmbeddingProvider {
+     pipeline = null;
+     modelDir;
+     initPromise = null;
+-    constructor(dataDir) {
++    proxyUrl;
++    constructor(dataDir, options) {
+         this.modelDir = path.join(dataDir, 'models');
+         fs.mkdirSync(this.modelDir, { recursive: true });
++        this.proxyUrl = options?.proxyUrl;
+     }
+     async initialize() {
+         if (this.pipeline)
+@@ -166,7 +174,7 @@ class LocalEmbeddingProvider {
+     }
+     async doInit() {
+         try {
+-            configureProxy();
++            configureProxy(this.proxyUrl);
+             // Dynamic import to avoid issues if transformers is not available
+             const { pipeline, env } = await Promise.resolve().then(() => __importStar(require('@xenova/transformers')));
+             // Cache models in our data directory
+diff --git a/node_modules/@biosbot/agent-memory/dist/memory.js b/node_modules/@biosbot/agent-memory/dist/memory.js
+index 1e68599..9bedf16 100644
+--- a/node_modules/@biosbot/agent-memory/dist/memory.js
++++ b/node_modules/@biosbot/agent-memory/dist/memory.js
+@@ -69,7 +69,7 @@ class AgentMemoryImpl {
+      */
+     static async create(userConfig) {
+         const dataDir = userConfig?.dataDir ?? DEFAULTS.dataDir;
+-        const embedding = userConfig?.embedding ?? new local_1.LocalEmbeddingProvider(dataDir);
++        const embedding = userConfig?.embedding ?? new local_1.LocalEmbeddingProvider(dataDir, { proxyUrl: userConfig?.proxyUrl });
+         const config = {
+             dataDir,
+             embedding,
+@@ -93,6 +93,17 @@ class AgentMemoryImpl {
+         if (this.closed)
+             throw new errors_1.MemoryClosedError();
+     }
++    /**
++     * Pre-download and load the default local embedding model (or call custom provider initialize).
++     * Safe to call multiple times; no-op if already initialized or provider has no initialize().
++     */
++    async initializeEmbedding() {
++        this.ensureOpen();
++        const emb = this.config.embedding;
++        if (emb && typeof emb.initialize === 'function') {
++            await emb.initialize();
++        }
++    }
+     // ============================================================
+     //  三层记忆检索与上下文组装（跨对话记忆 L2 / 长期记忆 L3 / 知识库）
+     // ============================================================
+diff --git a/node_modules/@biosbot/agent-memory/dist/types.d.ts b/node_modules/@biosbot/agent-memory/dist/types.d.ts
+index 4ebe615..04c5946 100644
+--- a/node_modules/@biosbot/agent-memory/dist/types.d.ts
++++ b/node_modules/@biosbot/agent-memory/dist/types.d.ts
+@@ -64,6 +64,8 @@ export interface EmbeddingProvider {
+     readonly dimensions: number;
+     /** Embed a single text string into a vector */
+     embed(text: string): Promise<number[]>;
++    /** Optional: preload model weights (default local provider implements this) */
++    initialize?(): Promise<void>;
+ }
+ /** LLM provider — used for archive summarization and fact extraction */
+ export interface LLMProvider {
+@@ -103,6 +105,11 @@ export interface LimitsConfig {
+ export interface MemoryConfig {
+     /** Data storage directory. Falls back to env var AGENT_MEMORY_DATA_DIR, then './agent-memory-data' */
+     dataDir?: string;
++    /**
++     * HTTPS proxy URL for downloading the default local embedding model (Xenova).
++     * When set, takes precedence over HTTPS_PROXY / HTTP_PROXY env vars for that provider.
++     */
++    proxyUrl?: string;
+     /** Custom embedding provider (default: built-in local model) */
+     embedding?: EmbeddingProvider;
+     /** LLM provider for summarization/extraction (default: none) */
+@@ -211,6 +218,8 @@ export interface AgentMemory {
+     searchConversation(query: string, topK?: number): Promise<Message[]>;
+     saveMemory(category: MemoryCategory, key: string, value: string, confidence?: number): Promise<string>;
+     searchMemory(query: string, topK?: number): Promise<ScoredMemoryItem[]>;
++    /** Preload embedding model (default: local Xenova); no-op for custom providers without initialize() */
++    initializeEmbedding(): Promise<void>;
+     deleteMemory(id: string): Promise<void>;
+     listMemories(filter?: MemoryFilter): Promise<MemoryItem[]>;
+     refreshAccess(id: string): Promise<void>;

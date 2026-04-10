@@ -1,0 +1,39 @@
+diff --git a/node_modules/@biosbot/agent-brain/dist/react/react-loop.js b/node_modules/@biosbot/agent-brain/dist/react/react-loop.js
+index 853f14c..5354357 100644
+--- a/node_modules/@biosbot/agent-brain/dist/react/react-loop.js
++++ b/node_modules/@biosbot/agent-brain/dist/react/react-loop.js
+@@ -157,10 +157,11 @@ class ReactLoop {
+             if (this.innateToolHub.hasTool(call.name)) {
+                 try {
+                     observation = await this.innateToolHub.execute(call.name, call.arguments);
+-                    const userResponse = call.arguments['question'] + ' -> ' + observation;
++                    const q = call.arguments['question'];
++                    const userResponse = (typeof q === 'string' ? q : '(tool)') + ' -> ' + observation;
+                     await this.memory.conversation_track(this.conversationId, 'user', userResponse);
+                     if (call.name === 'skill_load_main' || call.name === 'skill_load_reference') {
+-                        const skillName = call.arguments['skillName'];
++                        const skillName = call.arguments['skillName'] ?? call.arguments['name'];
+                         skillTools = this.skillHub.getTools(skillName);
+                     }
+                 }
+@@ -171,8 +172,18 @@ class ReactLoop {
+             }
+             else {
+                 try {
+-                    const skillName = call.arguments['skillName'];
+-                    observation = await this.skillHub.execute(skillName, call.name, call.arguments);
++                    let skillName = call.arguments['skillName'];
++                    let toolName = call.name;
++                    if (typeof toolName === 'string' && toolName.startsWith('skill.')) {
++                        const rest = toolName.slice('skill.'.length);
++                        const lastDot = rest.lastIndexOf('.');
++                        if (lastDot > 0) {
++                            if (skillName == null || skillName === '')
++                                skillName = rest.slice(0, lastDot);
++                            toolName = rest.slice(lastDot + 1);
++                        }
++                    }
++                    observation = await this.skillHub.execute(skillName, toolName, call.arguments);
+                 }
+                 catch (err) {
+                     controller.recordFailure();

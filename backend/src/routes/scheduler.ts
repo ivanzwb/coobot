@@ -37,8 +37,9 @@ router.post('/jobs', async (req: Request, res: Response) => {
 router.put('/jobs/:id', async (req: Request, res: Response) => {
   try {
     const { name, description, cronExpression, enabled, concurrencyPolicy } = req.body;
-    
-    await schedulerService.updateJob(req.params.id, {
+    const jobId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
+
+    await schedulerService.updateJob(jobId, {
       name,
       description,
       cronExpression,
@@ -54,7 +55,8 @@ router.put('/jobs/:id', async (req: Request, res: Response) => {
 
 router.delete('/jobs/:id', async (req: Request, res: Response) => {
   try {
-    await schedulerService.deleteJob(req.params.id);
+    const jobId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
+    await schedulerService.deleteJob(jobId);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -63,7 +65,8 @@ router.delete('/jobs/:id', async (req: Request, res: Response) => {
 
 router.post('/jobs/:id/trigger', async (req: Request, res: Response) => {
   try {
-    const taskId = await schedulerService.triggerNow(req.params.id);
+    const jobId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
+    const taskId = await schedulerService.triggerNow(jobId);
     res.json({ taskId });
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -72,7 +75,8 @@ router.post('/jobs/:id/trigger', async (req: Request, res: Response) => {
 
 router.get('/jobs/:id/logs', async (req: Request, res: Response) => {
   try {
-    const logs = await schedulerService.getExecutionLogs(req.params.id);
+    const jobId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
+    const logs = await schedulerService.getExecutionLogs(jobId);
     res.json(logs);
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -81,8 +85,9 @@ router.get('/jobs/:id/logs', async (req: Request, res: Response) => {
 
 router.get('/jobs/:id', async (req: Request, res: Response) => {
   try {
+    const jobId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
     const jobs = await schedulerService.getJobs();
-    const job = jobs.find(j => j.id === req.params.id);
+    const job = jobs.find(j => j.id === jobId);
     if (!job) {
       return res.status(404).json({ error: 'SCHEDULED_JOB_NOT_FOUND' });
     }
@@ -94,7 +99,8 @@ router.get('/jobs/:id', async (req: Request, res: Response) => {
 
 router.post('/jobs/:id/enable', async (req: Request, res: Response) => {
   try {
-    await schedulerService.updateJob(req.params.id, { enabled: true });
+    const jobId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
+    await schedulerService.updateJob(jobId, { enabled: true });
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -103,7 +109,8 @@ router.post('/jobs/:id/enable', async (req: Request, res: Response) => {
 
 router.post('/jobs/:id/disable', async (req: Request, res: Response) => {
   try {
-    await schedulerService.updateJob(req.params.id, { enabled: false });
+    const jobId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
+    await schedulerService.updateJob(jobId, { enabled: false });
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: String(error) });

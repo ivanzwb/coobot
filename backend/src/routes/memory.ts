@@ -103,7 +103,8 @@ router.post('/ltm', async (req: Request, res: Response) => {
 
 router.delete('/ltm/:id', async (req: Request, res: Response) => {
   try {
-    await memoryEngine.deleteLtm(req.params.id);
+    const id = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
+    await memoryEngine.deleteLtm(id);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: String(error) });

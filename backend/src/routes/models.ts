@@ -34,7 +34,8 @@ router.post('/', async (req: Request, res: Response) => {
 
 router.post('/:id/test', async (req: Request, res: Response) => {
   try {
-    const health = await modelHub.testConnection(req.params.id);
+    const id = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
+    const health = await modelHub.testConnection(id);
     res.json({
       success: health.status === 'ready',
       status: health.status,

@@ -108,6 +108,7 @@ router.post('/:id/clarify', async (req: Request, res: Response) => {
 
     let updatedPayload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
     updatedPayload = mergeClarificationIntoPayload(updatedPayload, clarificationData);
+    delete updatedPayload.clarificationQuestions;
 
     await memoryEngine.appendMessage('user', String(replyText).trim(), [], id);
 
@@ -146,6 +147,7 @@ router.post('/:id/retry-after-clarification', async (req: Request, res: Response
 
     let updatedPayload = task.inputPayload ? JSON.parse(task.inputPayload) : {};
     updatedPayload = mergeClarificationIntoPayload(updatedPayload, clarificationData);
+    delete updatedPayload.clarificationQuestions;
 
     const replyText =
       clarificationData &&

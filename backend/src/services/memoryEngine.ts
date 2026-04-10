@@ -1,5 +1,5 @@
 import { db, schema } from '../db';
-import { eq, and, gte, lt } from 'drizzle-orm';
+import { eq, and, gte, lt, desc } from 'drizzle-orm';
 import type { MemoryCategory, LtmQueryResult } from '../types';
 import type { SessionMessage, LongTermMemory } from '../db';
 import { logger } from './logger.js';
@@ -37,12 +37,34 @@ export class MemoryEngine {
       .limit(limit) as unknown as SessionMessage[];
   }
 
+  /**
+   * Oldest-first page (offset from start of table). Used by Memory admin `/history` pagination.
+   */
   async getAllHistory(limit: number = 100, offset: number = 0): Promise<SessionMessage[]> {
     return await db.select()
       .from(schema.sessionMemory)
       .orderBy(schema.sessionMemory.createdAt)
       .limit(limit)
       .offset(offset) as unknown as SessionMessage[];
+  }
+
+  /**
+   * Latest messages for chat UI: newest rows first from DB, then reversed to chronological order.
+   */
+  async getRecentChatHistory(limit: number = 50, offset: number = 0): Promise<SessionMessage[]> {
+    const rows = await db.select()
+      .from(schema.sessionMemory)
+      .orderBy(desc(schema.sessionMemory.createdAt))
+      .limit(limit)
+      .offset(offset);
+    return [...rows].reverse() as unknown as SessionMessage[];
+  }
+
+  /** Full session log in chronological order (e.g. chat export). */
+  async getAllSessionMessagesChronological(): Promise<SessionMessage[]> {
+    return await db.select()
+      .from(schema.sessionMemory)
+      .orderBy(schema.sessionMemory.createdAt) as unknown as SessionMessage[];
   }
 
   private estimateTokenCount(text: string): number {

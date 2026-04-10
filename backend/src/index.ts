@@ -6,6 +6,7 @@ import { createServer } from 'http';
 import cron from 'node-cron';
 import routes from './routes/index.js';
 import { configManager, initializeDatabase, schedulerService, agentCapabilityRegistry, taskOrchestrator, vectorStore, monitorService, memoryEngine, logger, backupService, skillRegistry } from './services/index.js';
+import { ensureAgentMemory, warmupAgentMemoryEmbedding } from './services/agentBrain/index.js';
 import { eventBus } from './services/eventBus.js';
 
 dotenv.config();
@@ -29,6 +30,8 @@ async function bootstrap() {
 
     await initializeDatabase();
     await vectorStore.initialize();
+    await ensureAgentMemory();
+    await warmupAgentMemoryEmbedding();
     await agentCapabilityRegistry.loadFromDatabase();
     await skillRegistry.registerAllSkillTools();
 

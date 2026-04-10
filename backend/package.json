@@ -6,13 +6,16 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "postinstall": "patch-package",
     "start": "node dist/index.js",
     "db:generate": "drizzle-kit generate:sqlite",
     "db:push": "drizzle-kit push:sqlite",
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
-    "@lancedb/lancedb": "^0.27.1",
+    "@biosbot/agent-brain": "^0.1.0",
+    "@biosbot/agent-memory": "^0.1.3",
+    "@biosbot/agent-skills": "^0.1.3",
     "adm-zip": "^0.5.16",
     "archiver": "^7.0.1",
     "better-sqlite3": "^12.8.0",
@@ -41,6 +44,7 @@
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.5.10",
     "drizzle-kit": "^0.31.10",
+    "patch-package": "^8.0.1",
     "tsx": "^4.7.0",
     "typescript": "^6.0.2"
   }

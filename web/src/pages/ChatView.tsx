@@ -1,7 +1,20 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { tasksApi, chatApi, authApi, type ChatMessage } from '../api';
+import type { Task } from '../types';
 import { useWebSocket, useTaskEvents, useAuthRequests, type AuthRequestPayload } from '../hooks/useWebSocket';
+
+function clarificationQuestionsFromTask(task: Task | null): string[] {
+  if (!task?.inputPayload) return [];
+  try {
+    const p = JSON.parse(task.inputPayload) as Record<string, unknown>;
+    const q = p.clarificationQuestions;
+    if (!Array.isArray(q)) return [];
+    return q.filter((x): x is string => typeof x === 'string' && x.trim() !== '');
+  } catch {
+    return [];
+  }
+}
 
 const ChatView: React.FC = () => {
   const [input, setInput] = useState('');
@@ -61,6 +74,11 @@ const ChatView: React.FC = () => {
       (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
     )[0];
   }, [tasks]);
+
+  const pendingClarificationQuestions = useMemo(
+    () => clarificationQuestionsFromTask(clarificationPendingTask),
+    [clarificationPendingTask]
+  );
 
   const fetchChatHistory = async () => {
     try {
@@ -247,7 +265,10 @@ const ChatView: React.FC = () => {
         ) : (
           chatHistory.map((chatMsg) => {
             const st = roleStyle(chatMsg.role);
-            const task = chatMsg.role === 'user' ? getTaskById(chatMsg.taskId) : null;
+            const task =
+              chatMsg.taskId && (chatMsg.role === 'user' || chatMsg.role === 'system')
+                ? getTaskById(chatMsg.taskId)
+                : null;
             return (
               <div key={chatMsg.id} className="message">
                 <div
@@ -275,7 +296,9 @@ const ChatView: React.FC = () => {
                               ? '#52c41a'
                               : task.status === 'EXCEPTION'
                                 ? '#ff4d4f'
-                                : '#999',
+                                : task.status === 'CLARIFICATION_PENDING'
+                                  ? '#2f54eb'
+                                  : '#999',
                           marginBottom: 8,
                         }}
                       >
@@ -316,6 +339,38 @@ const ChatView: React.FC = () => {
                           </div>
                         </div>
                       )}
+
+                      {task.status === 'CLARIFICATION_PENDING' && (() => {
+                        const qs = clarificationQuestionsFromTask(task);
+                        return (
+                        <div
+                          style={{
+                            background: '#f0f5ff',
+                            border: '1px solid #adc6ff',
+                            padding: 12,
+                            borderRadius: 4,
+                            marginTop: 8,
+                          }}
+                        >
+                          <div style={{ fontWeight: 600, marginBottom: 8, color: '#2f54eb' }}>
+                            需要您补充说明（可在下方输入框回复）
+                          </div>
+                          {qs.length > 0 ? (
+                            <ol style={{ margin: 0, paddingLeft: 20, color: '#434343' }}>
+                              {qs.map((q, idx) => (
+                                <li key={idx} style={{ marginTop: 4 }}>
+                                  {q}
+                                </li>
+                              ))}
+                            </ol>
+                          ) : (
+                            <div style={{ fontSize: 13, color: '#595959' }}>
+                              请根据上方系统消息补充信息。
+                            </div>
+                          )}
+                        </div>
+                        );
+                      })()}
 
                       {task.outputSummary && (
                         <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #eee' }}>
@@ -444,12 +499,26 @@ const ChatView: React.FC = () => {
               fontSize: 13,
               color: '#2f54eb',
               marginBottom: 8,
-              padding: '8px 12px',
+              padding: '10px 14px',
               background: '#f0f5ff',
               borderRadius: 6,
+              border: '1px solid #adc6ff',
             }}
           >
-            当前任务需要澄清：请直接在输入框中回复补充说明（将作为同一条对话继续）。
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>
+              当前任务需要澄清：请在输入框回复（将作为同一条对话继续）
+            </div>
+            {pendingClarificationQuestions.length > 0 ? (
+              <ol style={{ margin: 0, paddingLeft: 20, color: '#434343' }}>
+                {pendingClarificationQuestions.map((q, idx) => (
+                  <li key={idx} style={{ marginTop: 4 }}>
+                    {q}
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <div style={{ color: '#595959' }}>请根据对话中的系统说明作答。</div>
+            )}
           </div>
         )}
         <div className="chat-input-wrapper">

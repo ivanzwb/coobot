@@ -143,9 +143,16 @@ export class KnowledgeEngine {
 
   private async parsePdf(filePath: string): Promise<string> {
     try {
-      const pdfParse = await import('pdf-parse');
+      const pdfParseMod = (await import('pdf-parse')) as unknown as {
+        default?: (b: Buffer) => Promise<{ text: string }>;
+        (b: Buffer): Promise<{ text: string }>;
+      };
+      const parseFn =
+        typeof pdfParseMod.default === 'function'
+          ? pdfParseMod.default
+          : (pdfParseMod as (b: Buffer) => Promise<{ text: string }>);
       const dataBuffer = fs.readFileSync(filePath);
-      const data = await pdfParse.default(dataBuffer);
+      const data = await parseFn(dataBuffer);
       return data.text;
     } catch (error) {
       console.error('PDF parse error:', error);
