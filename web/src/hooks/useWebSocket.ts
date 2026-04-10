@@ -117,3 +117,41 @@ export function useAuthRequests(onAuth: (data: AuthRequestPayload) => void) {
     };
   }, []);
 }
+
+export interface BrainInputRequestPayload {
+  taskId: string;
+  agentId: string;
+  question: string;
+}
+
+/**
+ * AgentBrain `ask_user` is waiting: user should reply in chat with `brainReplyTaskId`.
+ */
+export function useBrainInputRequests(
+  onRequest: (data: BrainInputRequestPayload) => void,
+  onResolved?: (taskId: string) => void
+) {
+  const reqRef = useRef(onRequest);
+  const resRef = useRef(onResolved);
+  reqRef.current = onRequest;
+  resRef.current = onResolved;
+
+  useEffect(() => {
+    initWebSocket();
+
+    const handleMessage = (message: WebSocketMessage) => {
+      if (message.type === 'brain_input_request' && message.data) {
+        reqRef.current(message.data as BrainInputRequestPayload);
+      }
+      if (message.type === 'brain_input_resolved' && message.data) {
+        const taskId = (message.data as { taskId?: string }).taskId;
+        if (taskId) resRef.current?.(taskId);
+      }
+    };
+
+    subscribers.add(handleMessage);
+    return () => {
+      subscribers.delete(handleMessage);
+    };
+  }, []);
+}

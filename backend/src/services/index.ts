@@ -29,7 +29,7 @@ export async function initializeDatabase(): Promise<void> {
     'agents', 'modelConfigs', 'skills', 'agentSkills',
     'agentToolPermissions', 'tasks', 'taskLogs',
     'knowledgeFiles', 'sessionMemory', 'longTermMemory', 'auditLogs',
-    'scheduledJobs', 'jobExecutionLogs', 'permissionRequests'
+    'scheduledJobs', 'jobExecutionLogs', 'agentBrainCronJobs', 'permissionRequests'
   ];
 
   for (const table of tables) {

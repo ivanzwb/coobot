@@ -6,7 +6,13 @@ import { createServer } from 'http';
 import cron from 'node-cron';
 import routes from './routes/index.js';
 import { configManager, initializeDatabase, schedulerService, agentCapabilityRegistry, taskOrchestrator, vectorStore, monitorService, memoryEngine, logger, backupService, skillRegistry } from './services/index.js';
-import { ensureAgentMemory, warmupAgentMemoryEmbedding } from './services/agentBrain/index.js';
+import {
+  ensureAgentMemory,
+  warmupAgentMemoryEmbedding,
+  initAgentBrainCronHub,
+  disposeAgentBrainCronHub,
+  formatCronJobUserInput,
+} from './services/agentBrain/index.js';
 import { eventBus } from './services/eventBus.js';
 
 dotenv.config();
@@ -34,6 +40,17 @@ async function bootstrap() {
     await warmupAgentMemoryEmbedding();
     await agentCapabilityRegistry.loadFromDatabase();
     await skillRegistry.registerAllSkillTools();
+
+    await initAgentBrainCronHub({
+      onJobTrigger: async (job) => {
+        const content = formatCronJobUserInput(job);
+        logger.info('AgentBrainCron', 'Cron job fired; enqueueing leader task', {
+          jobId: job.id,
+          name: job.name,
+        });
+        await taskOrchestrator.createTask({ content }, 'event_triggered');
+      },
+    });
 
     schedulerService.start();
     monitorService.startMonitoring();
@@ -96,6 +113,7 @@ async function bootstrap() {
 
 process.on('SIGINT', () => {
   logger.info('Server', 'Shutting down...');
+  disposeAgentBrainCronHub();
   schedulerService.stop();
   taskOrchestrator.destroy();
   process.exit(0);

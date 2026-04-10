@@ -6,6 +6,8 @@ import path from 'path';
 import fs from 'fs';
 import { migrateMergeAgentCapabilities } from './migrateMergeAgentCapabilities.js';
 import { migrateDropAgentsToolsJson } from './migrateDropAgentsToolsJson.js';
+import { migrateAgentBrainCronJobs } from './migrateAgentBrainCronJobs.js';
+import { migrateTaskLlmTokens } from './migrateTaskLlmTokens.js';
 
 const workspacePath = configManager.getWorkspacePath();
 const databaseDir = path.join(workspacePath, 'database');
@@ -18,6 +20,8 @@ sqlite.pragma('journal_mode = WAL');
 
 migrateMergeAgentCapabilities(sqlite);
 migrateDropAgentsToolsJson(sqlite);
+migrateAgentBrainCronJobs(sqlite);
+migrateTaskLlmTokens(sqlite);
 
 export const db = drizzle(sqlite, { schema });
 

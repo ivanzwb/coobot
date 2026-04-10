@@ -1,20 +1,57 @@
 import { Router, Request, Response } from 'express';
 import { memoryEngine, taskOrchestrator, logger } from '../services/index.js';
+import { provideBrainUserInput } from '../services/agentBrain/brainUserInputBridge.js';
+import type { Attachment } from '../types/index.js';
 
 const router = Router();
 
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { content, attachments } = req.body;
+    const { content, attachments, brainReplyTaskId } = req.body as {
+      content?: string;
+      attachments?: unknown[];
+      brainReplyTaskId?: string;
+    };
+
+    const safeAttachments = (attachments ?? []) as Record<string, unknown>[];
+
+    if (
+      typeof brainReplyTaskId === 'string' &&
+      brainReplyTaskId.length > 0 &&
+      typeof content === 'string' &&
+      content.trim() !== ''
+    ) {
+      if (provideBrainUserInput(brainReplyTaskId, content)) {
+        const messageId = await memoryEngine.appendMessage(
+          'user',
+          content.trim(),
+          safeAttachments,
+          brainReplyTaskId
+        );
+        logger.info('Chat', 'Delivered message to AgentBrain ask_user', { brainReplyTaskId });
+        return res.status(200).json({
+          messageId,
+          taskId: brainReplyTaskId,
+          deliveredBrainInput: true,
+        });
+      }
+    }
+
+    if (typeof content !== 'string' || content.trim() === '') {
+      return res.status(400).json({ error: 'CONTENT_REQUIRED' });
+    }
 
     logger.info('Chat', 'User input received', { content, attachments });
 
-    const task = await taskOrchestrator.createTask({
-      content,
-      attachments,
-    }, 'immediate');
+    const task = await taskOrchestrator.createTask(
+      {
+        content,
+        attachments: safeAttachments as unknown as Attachment[],
+      },
+      'immediate'
+    );
 
-    const messageId = await memoryEngine.appendMessage('user', content, attachments, task.id);
+    const messageId = await memoryEngine.appendMessage('user', content, safeAttachments, task.id);
 
     res.status(201).json({
       messageId,

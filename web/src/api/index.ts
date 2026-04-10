@@ -1,5 +1,18 @@
 import axios from 'axios';
-import type { Task, Agent, Model, KnowledgeFile, Message, LongTermMemory, ScheduledJob, AgentMetrics, ResourceMetrics, SystemConfig } from '../types';
+import type {
+  Task,
+  Agent,
+  Model,
+  KnowledgeFile,
+  Message,
+  LongTermMemory,
+  ScheduledJob,
+  AgentBrainCronJob,
+  AgentMetrics,
+  ResourceMetrics,
+  SystemConfig,
+  TokenMetricsResponse,
+} from '../types';
 
 const api = axios.create({
   baseURL: '/api/v1',
@@ -16,7 +29,7 @@ export interface ChatMessage {
 }
 
 export const chatApi = {
-  send: (data: { content: string; attachments?: unknown[] }) =>
+  send: (data: { content: string; attachments?: unknown[]; brainReplyTaskId?: string }) =>
     api.post('/chat', data),
   getHistory: (limit?: number, offset?: number) =>
     api.get<ChatMessage[]>('/chat', { params: { limit, offset } }),
@@ -114,6 +127,8 @@ export const systemApi = {
   health: () => api.get('/system/health'),
   getAgentMetrics: () => api.get<AgentMetrics[]>('/system/metrics/agents'),
   getResourceMetrics: () => api.get<ResourceMetrics>('/system/metrics/resources'),
+  getTokenMetrics: (days?: number) =>
+    api.get<TokenMetricsResponse>('/system/metrics/tokens', { params: days != null ? { days } : {} }),
 };
 
 export const authApi = {
@@ -143,6 +158,11 @@ export const schedulerApi = {
   getLogs: (jobId: string) => api.get(`/scheduler/jobs/${jobId}/logs`),
   enableJob: (id: string) => api.post(`/scheduler/jobs/${id}/enable`),
   disableJob: (id: string) => api.post(`/scheduler/jobs/${id}/disable`),
+  getAgentBrainJobs: () => api.get<{ jobs: AgentBrainCronJob[] }>('/scheduler/agent-brain-jobs'),
+  deleteAgentBrainJob: (id: string) => api.delete(`/scheduler/agent-brain-jobs/${id}`),
+  triggerAgentBrainJob: (id: string) => api.post(`/scheduler/agent-brain-jobs/${id}/trigger`),
+  pauseAgentBrainJob: (id: string) => api.post(`/scheduler/agent-brain-jobs/${id}/pause`),
+  resumeAgentBrainJob: (id: string) => api.post(`/scheduler/agent-brain-jobs/${id}/resume`),
 };
 
 export default api;

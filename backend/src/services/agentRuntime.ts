@@ -8,15 +8,23 @@ import { taskOrchestrator } from './taskOrchestrator';
 import { eventBus } from './eventBus.js';
 import { logger } from './logger.js';
 import { configManager } from './configManager.js';
-import { AgentBrain, OpenAIClient, TaskStatus, StepPhase } from '@biosbot/agent-brain';
+import { AgentBrain, TaskStatus, StepPhase, type PermissionRequest } from '@biosbot/agent-brain';
 import {
   coobotBrainSession,
   ensureAgentMemory,
   CoobotMemoryHub,
-  CoobotKnowledgeHub,
   CoobotSkillHub,
   getSkillFramework,
 } from './agentBrain/index.js';
+import { getAgentBrainCronHub } from './agentBrain/brainCronHubSingleton.js';
+import { brainPermissionToPolicyContext } from './agentBrain/brainToolPermissionBridge.js';
+import {
+  buildAskUserFallbackAnswer,
+  requestBrainUserInput,
+} from './agentBrain/brainUserInputBridge.js';
+import { authService } from './authService.js';
+import { PermissionDeniedError, SecurityError, securitySandbox } from './securitySandbox.js';
+import { MeteredOpenAIClient } from './agentBrain/meteredOpenAIClient.js';
 
 export interface ReActStep {
   stepIndex: number;
@@ -47,7 +55,9 @@ export interface AgentConfig {
 }
 
 export class AgentRuntime extends EventEmitter {
-  private maxReActSteps: number = 15;
+  /** Aligned with agent-brain demo `demo/src/index.ts` (`maxSteps` / `maxReplans`). */
+  private readonly brainMaxSteps = 50;
+  private readonly brainMaxReplans = 5;
   private runningTasks: Map<string, { abortController: AbortController; isRunning: boolean }> = new Map();
 
   async executeTask(task: Task, agentConfig: AgentConfig): Promise<void> {
@@ -65,7 +75,15 @@ export class AgentRuntime extends EventEmitter {
     const userRequest = String(payload.content ?? payload.description ?? '');
 
     let brainRef: AgentBrain | null = null;
+    let meteredModel: MeteredOpenAIClient | null = null;
     let stepCounter = 1;
+
+    const brainLlmUsage = (): { prompt: number; completion: number; total: number } | undefined => {
+      const u = meteredModel?.getUsage();
+      if (!u) return undefined;
+      if (u.prompt === 0 && u.completion === 0 && u.total === 0) return undefined;
+      return { prompt: u.prompt, completion: u.completion, total: u.total };
+    };
 
     const publishStep = (type: string, p: Record<string, unknown>) => {
       if (type === 'step:thought') {
@@ -107,7 +125,6 @@ export class AgentRuntime extends EventEmitter {
       coobotBrainSession.reset(task.id, agentConfig.id, agentConfig.skills);
       const agentMem = await ensureAgentMemory();
       const memoryHub = new CoobotMemoryHub(agentMem, coobotBrainSession);
-      const knowledgeHub = new CoobotKnowledgeHub(coobotBrainSession);
       const skillHub = new CoobotSkillHub(getSkillFramework, coobotBrainSession);
 
       const mc = agentConfig.modelConfig;
@@ -116,21 +133,68 @@ export class AgentRuntime extends EventEmitter {
         return;
       }
 
-      const model = new OpenAIClient({
+      meteredModel = new MeteredOpenAIClient({
         apiKey: mc.apiKey || '',
         baseURL: mc.baseUrl || undefined,
         model: mc.modelName,
         temperature: agentConfig.temperature ?? mc.temperature ?? 0.2,
         timeoutMs: 120_000,
       });
+      const model = meteredModel;
 
       const systemPrompt = await this.buildSystemPrompt(agentConfig);
+
+      const brainSandboxAskHandler = async (request: PermissionRequest): Promise<boolean> => {
+        const { policyToolName, sandboxArgs, policyAliases } = brainPermissionToPolicyContext(request);
+        try {
+          const perm = await securitySandbox.intercept(
+            agentConfig.id,
+            policyToolName,
+            sandboxArgs,
+            policyAliases.length ? policyAliases : undefined
+          );
+          if (perm.policy === 'ASK') {
+            await authService.waitForAuthorization(
+              agentConfig.id,
+              policyToolName,
+              {
+                source: 'agent_brain',
+                action: request.action,
+                target: request.target,
+                detail: request.detail,
+                brainTool: request.toolName,
+                ...sandboxArgs,
+              },
+              task.id
+            );
+          }
+          return true;
+        } catch (e) {
+          if (e instanceof PermissionDeniedError) {
+            logger.warn('AgentRuntime', 'AgentBrain tool denied by policy', {
+              taskId: task.id,
+              policyToolName,
+              brainTool: request.toolName,
+            });
+            return false;
+          }
+          if (e instanceof SecurityError) {
+            logger.warn('AgentRuntime', 'AgentBrain sandbox security rejected', {
+              taskId: task.id,
+              message: e.message,
+            });
+            return false;
+          }
+          throw e;
+        }
+      };
 
       const brain = new AgentBrain({
         model,
         memory: memoryHub,
-        knowledge: knowledgeHub,
+        knowledge: memoryHub,
         skills: skillHub,
+        cron: getAgentBrainCronHub(),
         sandbox: {
           workingDirectory: configManager.getWorkspacePath(),
           defaultPermission: 'ASK',
@@ -138,21 +202,33 @@ export class AgentRuntime extends EventEmitter {
             { action: 'web_fetch', permission: 'ALLOW' },
             { action: 'web_search', permission: 'ALLOW' },
           ],
+          askHandler: brainSandboxAskHandler,
         },
         config: {
           systemPrompt,
           modelContextSize: 128_000,
-          maxSteps: this.maxReActSteps,
-          maxReplans: 2,
+          maxSteps: this.brainMaxSteps,
+          maxReplans: this.brainMaxReplans,
         },
         eventPublisher: {
           publish: (type: string, payload: unknown) => {
             if (type === 'user:input-request') {
               const question = String((payload as { question?: string }).question ?? '');
-              setImmediate(() => {
-                brainRef?.provideUserInput(
-                  `【系统】当前会话未接入交互式输入；请尽量用已有信息与工具继续。原问题：${question}`
-                );
+              eventBus.broadcast({
+                type: 'brain_input_request',
+                data: {
+                  taskId: task.id,
+                  agentId: agentConfig.id,
+                  question,
+                },
+              });
+              void requestBrainUserInput(task.id, question).then((answer) => {
+                const text = answer.trim() || buildAskUserFallbackAnswer(question);
+                brainRef?.provideUserInput(text);
+                eventBus.broadcast({
+                  type: 'brain_input_resolved',
+                  data: { taskId: task.id, fromUser: answer.trim().length > 0 },
+                });
               });
               return;
             }
@@ -177,15 +253,18 @@ export class AgentRuntime extends EventEmitter {
             ? 'TERMINATED'
             : 'EXCEPTION';
 
+      const usage = brainLlmUsage();
       if (status === 'COMPLETED') {
-        await taskOrchestrator.updateTaskStatus(task.id, 'COMPLETED', undefined, finalOutput);
+        await taskOrchestrator.updateTaskStatus(task.id, 'COMPLETED', undefined, finalOutput, usage);
       } else if (status === 'TERMINATED') {
-        await taskOrchestrator.updateTaskStatus(task.id, 'TERMINATED', result.terminationReason);
+        await taskOrchestrator.updateTaskStatus(task.id, 'TERMINATED', result.terminationReason, undefined, usage);
       } else {
         await taskOrchestrator.updateTaskStatus(
           task.id,
           'EXCEPTION',
-          result.terminationReason || finalOutput || 'AgentBrain failed'
+          result.terminationReason || finalOutput || 'AgentBrain failed',
+          undefined,
+          usage
         );
       }
 
@@ -214,7 +293,7 @@ export class AgentRuntime extends EventEmitter {
         timestamp: new Date(),
       });
 
-      await taskOrchestrator.updateTaskStatus(task.id, 'EXCEPTION', errorMessage);
+      await taskOrchestrator.updateTaskStatus(task.id, 'EXCEPTION', errorMessage, undefined, brainLlmUsage());
       this.emit('task_failed', { taskId: task.id, error: errorMessage });
     } finally {
       this.runningTasks.delete(task.id);
@@ -234,6 +313,13 @@ export class AgentRuntime extends EventEmitter {
       parts.push(`\nBehavior Guidelines:\n${agentConfig.behaviorRules}`);
     }
     parts.push(`\nAlways respond in the same language as the user's input.`);
+
+    parts.push(
+      `\n## Host environment (BiosBot)\n` +
+        `- Recurring reminders and in-app scheduling use the built-in **cron_** tools (e.g. \`cron_add\` with a standard cron expression, UTC).\n` +
+        `- Do **not** call \`ask_user\` to ask which phone, PC, or third-party app to use unless the user explicitly needs an integration outside this application.\n` +
+        `- When the user only needs a reminder inside this product, pick the cron tools directly without platform clarification.`
+    );
 
     if (agentConfig.capabilityBoundary) {
       parts.push(`\nCapability Boundaries:\n${agentConfig.capabilityBoundary}`);

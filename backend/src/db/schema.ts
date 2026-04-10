@@ -80,6 +80,9 @@ export const tasks = sqliteTable('tasks', {
   updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
   startedAt: integer('started_at', { mode: 'timestamp' }),
   finishedAt: integer('finished_at', { mode: 'timestamp' }),
+  llmPromptTokens: integer('llm_prompt_tokens'),
+  llmCompletionTokens: integer('llm_completion_tokens'),
+  llmTotalTokens: integer('llm_total_tokens'),
 });
 
 export const taskLogs = sqliteTable('task_logs', {
@@ -184,6 +187,20 @@ export const jobExecutionLogs = sqliteTable('job_execution_logs', {
   errorMessage: text('error_message'),
   retryCount: integer('retry_count').default(0),
   createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`CURRENT_TIMESTAMP`),
+});
+
+/** In-app cron jobs created via AgentBrain `cron_add` (distinct from `scheduled_jobs` / schedulerService). */
+export const agentBrainCronJobs = sqliteTable('agent_brain_cron_jobs', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull().default(''),
+  cronExpression: text('cron_expression').notNull(),
+  command: text('command').notNull().default(''),
+  status: text('status').notNull().default('active'),
+  nextRunIso: text('next_run_iso'),
+  lastRunIso: text('last_run_iso'),
+  lastStatus: text('last_status'),
+  lastError: text('last_error'),
+  createdAtIso: text('created_at_iso').notNull(),
 });
 
 

@@ -2,18 +2,94 @@ import * as fs from 'fs';
 import type { SkillHub, ToolDefinition } from '@biosbot/agent-brain';
 import { SkillFramework } from '@biosbot/agent-skills';
 import type { CoobotBrainSession } from './coobotBrainSession.js';
+
+/** Ported from agent-brain demo `demo/src/skill-hub-adapter.ts` — framework tool schemas for the LLM. */
+const FRAMEWORK_TOOL_DECLARATIONS: ToolDefinition[] = [
+  {
+    name: 'skill_find',
+    description: 'Search for available skills from the online skill registry by keyword.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search keyword or phrase to find relevant skills' },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'skill_list',
+    description:
+      'List locally installed skills (Coobot: only skills assigned to this agent). Returns names and descriptions.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'skill_install',
+    description:
+      'Install a skill from the online registry or a direct source. Accepts a skill name from skill_find, npm package, URL, or local path.',
+    parameters: {
+      type: 'object',
+      properties: {
+        source: {
+          type: 'string',
+          description: 'Skill name from skill_find results, npm package name, URL, or local file path',
+        },
+      },
+      required: ['source'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'skill_load_main',
+    description: 'Load the main context file (main.md) of a skill.',
+    parameters: {
+      type: 'object',
+      properties: { name: { type: 'string', description: 'Name of the skill' } },
+      required: ['name'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'skill_load_reference',
+    description: "Load a reference file from a skill's reference directory.",
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Name of the skill' },
+        referencePath: { type: 'string', description: 'Relative path to the reference file' },
+      },
+      required: ['name', 'referencePath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'skill_list_tools',
+    description: 'List all tools provided by a specific skill.',
+    parameters: {
+      type: 'object',
+      properties: { name: { type: 'string', description: 'Name of the skill' } },
+      required: ['name'],
+      additionalProperties: false,
+    },
+  },
+];
+
 export class CoobotSkillHub implements SkillHub {
+  private readonly toolMap: Map<string, ToolDefinition>;
+
   constructor(
     private readonly getSf: () => SkillFramework,
     private readonly session: CoobotBrainSession
-  ) {}
-
-  getToolDefinition(_toolName: string): ToolDefinition | undefined {
-    return undefined;
+  ) {
+    this.toolMap = new Map(FRAMEWORK_TOOL_DECLARATIONS.map((d) => [d.name, d]));
   }
 
-  hasTool(_toolName: string): boolean {
-    return false;
+  getToolDefinition(toolName: string): ToolDefinition | undefined {
+    return this.toolMap.get(toolName);
+  }
+
+  hasTool(toolName: string): boolean {
+    return this.toolMap.has(toolName);
   }
 
   async skill_find(args: Record<string, unknown>): Promise<string> {

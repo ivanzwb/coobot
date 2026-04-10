@@ -29,6 +29,29 @@ export interface Task {
   updatedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  /** OpenAI-style LLM usage for this task row (Leader planning and/or AgentBrain execution). */
+  llmPromptTokens?: number | null;
+  llmCompletionTokens?: number | null;
+  llmTotalTokens?: number | null;
+}
+
+export interface TokenDailyStat {
+  date: string;
+  totalTokens: number;
+  taskCount: number;
+  promptTokens: number;
+  completionTokens: number;
+}
+
+export interface TokenMetricsResponse {
+  days: number;
+  since: string;
+  daily: TokenDailyStat[];
+  totals: {
+    tasksWithLlmUsage: number;
+    totalTokens: number;
+    avgTokensPerTask: number;
+  };
 }
 
 export interface Agent {
@@ -115,6 +138,20 @@ export interface ScheduledJob {
   concurrencyPolicy: 'FORBID' | 'ALLOW' | 'REPLACE';
   lastRunAt: string | null;
   nextRunAt: string;
+  createdAt: string;
+}
+
+/** Cron jobs created in chat via AgentBrain `cron_add` (CoobotCronHub). */
+export interface AgentBrainCronJob {
+  id: string;
+  name: string;
+  cronExpression: string;
+  command: string;
+  status: string;
+  nextRunTime?: string;
+  lastRunTime?: string;
+  lastStatus?: string;
+  lastError?: string;
   createdAt: string;
 }
 

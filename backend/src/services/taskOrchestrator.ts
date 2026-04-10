@@ -139,6 +139,9 @@ export class TaskOrchestrator extends EventEmitter {
       updatedAt: new Date(),
       startedAt: null as unknown as Date,
       finishedAt: null as unknown as Date,
+      llmPromptTokens: null,
+      llmCompletionTokens: null,
+      llmTotalTokens: null,
     };
 
     await db.insert(schema.tasks).values({
@@ -199,6 +202,9 @@ export class TaskOrchestrator extends EventEmitter {
         updatedAt: new Date(),
         startedAt: null as unknown as Date,
         finishedAt: null as unknown as Date,
+        llmPromptTokens: null,
+        llmCompletionTokens: null,
+        llmTotalTokens: null,
       };
 
       await db.insert(schema.tasks).values({
@@ -293,7 +299,13 @@ export class TaskOrchestrator extends EventEmitter {
     return this.agentQueues.get(agentId)?.length || 0;
   }
 
-  async updateTaskStatus(taskId: string, status: TaskStatus, errorMsg?: string, outputSummary?: string): Promise<void> {
+  async updateTaskStatus(
+    taskId: string,
+    status: TaskStatus,
+    errorMsg?: string,
+    outputSummary?: string,
+    llmUsage?: { prompt: number; completion: number; total: number }
+  ): Promise<void> {
     const task = this.taskQueue.get(taskId);
     if (!task) return;
 
@@ -317,6 +329,12 @@ export class TaskOrchestrator extends EventEmitter {
       task.outputSummary = outputSummary;
     }
 
+    if (llmUsage) {
+      task.llmPromptTokens = llmUsage.prompt;
+      task.llmCompletionTokens = llmUsage.completion;
+      task.llmTotalTokens = llmUsage.total;
+    }
+
     logger.info('TaskOrchestrator', 'Task status changed', {
       taskId,
       previousStatus,
@@ -333,6 +351,11 @@ export class TaskOrchestrator extends EventEmitter {
     if (task.finishedAt) updateData.finishedAt = task.finishedAt;
     if (task.errorMsg) updateData.errorMsg = task.errorMsg;
     if (task.outputSummary) updateData.outputSummary = task.outputSummary;
+    if (llmUsage) {
+      updateData.llmPromptTokens = llmUsage.prompt;
+      updateData.llmCompletionTokens = llmUsage.completion;
+      updateData.llmTotalTokens = llmUsage.total;
+    }
 
     await db.update(schema.tasks)
       .set(updateData)
@@ -349,6 +372,35 @@ export class TaskOrchestrator extends EventEmitter {
       agentId: task.assignedAgentId,
       timestamp: new Date(),
     });
+  }
+
+  /** Add LLM usage to a task (e.g. Leader planning calls across multiple analyze rounds). */
+  async addLlmTokens(
+    taskId: string,
+    delta: { prompt: number; completion: number; total: number }
+  ): Promise<void> {
+    const rows = await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)).limit(1);
+    const row = rows[0];
+    if (!row) return;
+    const p = (row.llmPromptTokens ?? 0) + delta.prompt;
+    const c = (row.llmCompletionTokens ?? 0) + delta.completion;
+    const t = (row.llmTotalTokens ?? 0) + delta.total;
+    await db
+      .update(schema.tasks)
+      .set({
+        llmPromptTokens: p,
+        llmCompletionTokens: c,
+        llmTotalTokens: t,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.tasks.id, taskId));
+    const mem = this.taskQueue.get(taskId);
+    if (mem) {
+      mem.llmPromptTokens = p;
+      mem.llmCompletionTokens = c;
+      mem.llmTotalTokens = t;
+      mem.updatedAt = new Date();
+    }
   }
 
   private async processAgentQueue(agentId: string): Promise<void> {

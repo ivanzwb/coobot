@@ -2,52 +2,60 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { db, schema } from '../db';
-import { eq, and } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { KnowledgeFile } from '../db';
 import { configManager } from './configManager';
-import { vectorStore, type VectorChunk } from './vectorStore';
+import { ensureAgentMemory } from './agentBrain/agentMemoryBootstrap.js';
+import {
+  aggregateKnowledgeFiles,
+  chunkMetadata,
+  coobotKnowledgeSource,
+  removeKnowledgeChunksForFile,
+} from './agentBrain/agentMemoryKnowledge.js';
 
 export interface VersionConflict {
   existingFile: KnowledgeFile;
   requiresDecision: true;
 }
 
+/**
+ * Agent knowledge files: stored only in `@biosbot/agent-memory` (vector + SQLite under workspace/database/agent-brain-memory).
+ * Uploaded binaries may still be kept on disk under workspace/knowledge/{agentId} for reindex/download.
+ */
 export class KnowledgeEngine {
   private supportedFileTypes = ['.txt', '.md', '.pdf', '.docx', '.png', '.jpg', '.jpeg'];
 
   async checkVersionConflict(fileName: string, agentId: string): Promise<VersionConflict | null> {
-    const existing = await db.select()
-      .from(schema.knowledgeFiles)
-      .where(
-        and(
-          eq(schema.knowledgeFiles.agentId, agentId),
-          eq(schema.knowledgeFiles.fileName, fileName)
-        )
-      );
-
-    if (existing.length > 0) {
-      return {
-        existingFile: existing[0] as unknown as KnowledgeFile,
-        requiresDecision: true,
-      };
+    const files = await this.getFiles(agentId);
+    const existing = files.find((f) => f.fileName === fileName);
+    if (existing) {
+      return { existingFile: existing, requiresDecision: true };
     }
     return null;
   }
 
-  async ingestFile(file: { path: string; name: string }, agentId: string, overwriteVersion?: string): Promise<KnowledgeFile> {
+  async ingestFile(
+    file: { path: string; name: string },
+    agentId: string,
+    overwriteVersion?: string
+  ): Promise<KnowledgeFile> {
     const conflict = await this.checkVersionConflict(file.name, agentId);
 
     if (conflict && !overwriteVersion) {
-      throw new Error('VERSION_CONFLICT:' + JSON.stringify({
-        existingFileId: conflict.existingFile.id,
-        existingFileName: conflict.existingFile.fileName,
-        existingVersion: conflict.existingFile.version,
-      }));
+      throw new Error(
+        'VERSION_CONFLICT:' +
+          JSON.stringify({
+            existingFileId: conflict.existingFile.id,
+            existingFileName: conflict.existingFile.fileName,
+            existingVersion: conflict.existingFile.version,
+          })
+      );
     }
 
     if (overwriteVersion && conflict) {
       await this.deleteFile(conflict.existingFile.id, false);
     }
+
     const fileId = uuidv4();
     const workspacePath = configManager.getWorkspacePath();
     const knowledgeDir = path.join(workspacePath, 'knowledge', agentId);
@@ -62,7 +70,32 @@ export class KnowledgeEngine {
     fs.copyFileSync(file.path, destPath);
 
     const fileHash = this.calculateFileHash(destPath);
-    const vectorPartition = `vec_${agentId}`;
+    const content = await this.parseFile(destPath, file.name);
+    const textChunks = this.chunkText(content);
+
+    if (textChunks.length === 0) {
+      if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
+      throw new Error('EMPTY_CONTENT: No extractable text from file (or unsupported type).');
+    }
+
+    const mem = await ensureAgentMemory();
+    const src = coobotKnowledgeSource(agentId);
+    const batch = textChunks.map((text, index) => ({
+      source: src,
+      title: `${file.name}#${index}`,
+      content: text,
+      metadata: {
+        fileId,
+        fileName: file.name,
+        filePath: destPath,
+        chunkIndex: index,
+        agentId,
+        fileHash,
+        kind: 'knowledge_upload',
+      },
+    }));
+
+    await mem.addKnowledgeBatch(batch);
 
     const knowledgeFile: KnowledgeFile = {
       id: fileId,
@@ -70,59 +103,14 @@ export class KnowledgeEngine {
       fileName: file.name,
       filePath: destPath,
       fileHash,
-      vectorPartition,
-      status: 'PROCESSING',
+      vectorPartition: 'agent-memory',
+      status: 'READY',
       version: 1,
       metaInfoJson: null as unknown as string,
       createdAt: new Date(),
     };
 
-    await db.insert(schema.knowledgeFiles).values({
-      id: knowledgeFile.id,
-      agentId: knowledgeFile.agentId,
-      fileName: knowledgeFile.fileName,
-      filePath: knowledgeFile.filePath,
-      fileHash: knowledgeFile.fileHash,
-      vectorPartition: knowledgeFile.vectorPartition,
-      status: knowledgeFile.status,
-      version: knowledgeFile.version,
-      metaInfoJson: knowledgeFile.metaInfoJson,
-      createdAt: knowledgeFile.createdAt,
-    });
-
-    this.processFileAsync(knowledgeFile);
-
     return knowledgeFile;
-  }
-
-  private async processFileAsync(file: KnowledgeFile): Promise<void> {
-    try {
-      const content = await this.parseFile(file.filePath, file.fileName);
-      const textChunks = this.chunkText(content);
-
-      const vectorChunks: VectorChunk[] = textChunks.map((text, index) => ({
-        id: uuidv4(),
-        text,
-        metadata: {
-          fileId: file.id,
-          fileName: file.fileName,
-          chunkIndex: index,
-          agentId: file.agentId,
-        },
-      }));
-
-      await vectorStore.createAgentCollection(file.agentId);
-      await vectorStore.addChunks(file.agentId, vectorChunks);
-
-      await db.update(schema.knowledgeFiles)
-        .set({ status: 'READY' })
-        .where(eq(schema.knowledgeFiles.id, file.id));
-    } catch (error) {
-      console.error('Failed to process file:', error);
-      await db.update(schema.knowledgeFiles)
-        .set({ status: 'ERROR' })
-        .where(eq(schema.knowledgeFiles.id, file.id));
-    }
   }
 
   private async parseFile(filePath: string, fileName: string): Promise<string> {
@@ -162,7 +150,7 @@ export class KnowledgeEngine {
 
   private async parseDocx(filePath: string): Promise<string> {
     try {
-      const result = await import('mammoth').then(m => m.extractRawText({ path: filePath }));
+      const result = await import('mammoth').then((m) => m.extractRawText({ path: filePath }));
       return result.value;
     } catch (error) {
       console.error('DOCX parse error:', error);
@@ -190,104 +178,110 @@ export class KnowledgeEngine {
     return crypto.createHash('sha256').update(fileBuffer).digest('hex');
   }
 
-  async search(query: string, agentId: string, topK: number = 5): Promise<{ content: string; source: string; score: number; metadata?: Record<string, unknown> }[]> {
+  async search(
+    query: string,
+    agentId: string,
+    topK: number = 5
+  ): Promise<{ content: string; source: string; score: number; metadata?: Record<string, unknown> }[]> {
     try {
       const agent = await db.select().from(schema.agents).where(eq(schema.agents.id, agentId));
       const agentName = agent[0]?.name || 'Unknown';
 
-      const vectorResults = await vectorStore.search(agentId, query, topK);
+      const mem = await ensureAgentMemory();
+      const raw = await mem.searchKnowledge(query, Math.min(80, topK * 15));
+      const src = coobotKnowledgeSource(agentId);
+      const filtered = raw.filter((c) => c.source === src || chunkMetadata(c).agentId === agentId);
+      const sliced = filtered.slice(0, topK);
 
-      return vectorResults.map(r => ({
-        content: r.text,
-        source: `依据：${agentName} 知识库 -> ${r.metadata.fileName}${r.metadata.page ? `, 第 ${r.metadata.page} 页` : ''}, 第 ${(r.metadata.chunkIndex || 0) + 1} 条`,
-        score: r.score,
-        metadata: {
-          fileId: r.metadata.fileId,
-          page: r.metadata.page,
-          chunkIndex: r.metadata.chunkIndex,
-          agentName,
-        },
-      }));
+      return sliced.map((r) => {
+        const m = chunkMetadata(r);
+        return {
+          content: r.content,
+          source: `依据：${agentName} 知识库 -> ${String(m.fileName ?? r.title)}，片段 ${Number(m.chunkIndex ?? 0) + 1}`,
+          score: r.score,
+          metadata: {
+            fileId: m.fileId,
+            chunkIndex: m.chunkIndex,
+            agentName,
+          },
+        };
+      });
     } catch (error) {
-      console.error('Vector search failed, falling back to keyword search:', error);
-
-      const files = await db.select()
-        .from(schema.knowledgeFiles)
-        .where(
-          and(
-            eq(schema.knowledgeFiles.agentId, agentId),
-            eq(schema.knowledgeFiles.status, 'READY')
-          )
-        );
-
-      const results: { content: string; source: string; score: number }[] = [];
-
-      for (const file of files) {
-        try {
-          const content = await this.parseFile(file.filePath, file.fileName);
-
-          const lowerContent = content.toLowerCase();
-          const lowerQuery = query.toLowerCase();
-          const matchCount = (lowerContent.match(new RegExp(lowerQuery.split(' ').join('|'), 'g')) || []).length;
-
-          if (matchCount > 0) {
-            const sentences = content.split(/[.!?]\s+/);
-            const relevantSentences = sentences.filter(s =>
-              s.toLowerCase().includes(lowerQuery)
-            ).slice(0, 3);
-
-            results.push({
-              content: relevantSentences.join('. '),
-              source: file.fileName,
-              score: Math.min(matchCount / query.split(' ').length, 1),
-            });
-          }
-        } catch (err) {
-          console.error('Error searching file:', file.fileName, err);
-        }
-      }
-
-      return results.sort((a, b) => b.score - a.score).slice(0, topK);
+      console.error('Knowledge search failed:', error);
+      return [];
     }
   }
 
   async getFiles(agentId: string): Promise<KnowledgeFile[]> {
-    return await db.select()
-      .from(schema.knowledgeFiles)
-      .where(eq(schema.knowledgeFiles.agentId, agentId)) as unknown as KnowledgeFile[];
+    const mem = await ensureAgentMemory();
+    const chunks = await mem.listKnowledge(coobotKnowledgeSource(agentId));
+    return aggregateKnowledgeFiles(chunks, agentId);
   }
 
   async deleteFile(fileId: string, deletePhysical: boolean = false): Promise<void> {
-    const file = await db.select()
-      .from(schema.knowledgeFiles)
-      .where(eq(schema.knowledgeFiles.id, fileId));
-
-    if (file.length > 0) {
-      const agentId = file[0].agentId;
-
-      await vectorStore.deleteFileChunks(agentId, fileId);
-
-      if (deletePhysical && fs.existsSync(file[0].filePath)) {
-        fs.unlinkSync(file[0].filePath);
+    const mem = await ensureAgentMemory();
+    let agentId = '';
+    let filePath = '';
+    const all = await mem.listKnowledge();
+    for (const c of all) {
+      const m = chunkMetadata(c);
+      if (String(m.fileId ?? '') !== fileId) continue;
+      agentId = String(m.agentId ?? '');
+      if (!agentId && c.source.startsWith('coobot:agent:')) {
+        agentId = c.source.slice('coobot:agent:'.length);
       }
-
-      await db.delete(schema.knowledgeFiles)
-        .where(eq(schema.knowledgeFiles.id, fileId));
+      filePath = String(m.filePath ?? '');
+      break;
+    }
+    if (agentId) {
+      await removeKnowledgeChunksForFile(mem, agentId, fileId);
+    } else {
+      await mem.removeKnowledge(fileId);
+    }
+    if (deletePhysical && filePath && fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        /* ignore */
+      }
     }
   }
 
   async reindexFile(fileId: string): Promise<void> {
-    const file = await db.select()
-      .from(schema.knowledgeFiles)
-      .where(eq(schema.knowledgeFiles.id, fileId));
-
-    if (file.length > 0) {
-      await db.update(schema.knowledgeFiles)
-        .set({ status: 'PROCESSING' })
-        .where(eq(schema.knowledgeFiles.id, fileId));
-
-      this.processFileAsync(file[0]);
+    const mem = await ensureAgentMemory();
+    const chunks = await mem.listKnowledge();
+    const first = chunks.find((c) => chunkMetadata(c).fileId === fileId);
+    if (!first) return;
+    let agentId = String(chunkMetadata(first).agentId ?? '');
+    if (!agentId && first.source.startsWith('coobot:agent:')) {
+      agentId = first.source.slice('coobot:agent:'.length);
     }
+    const filePath = String(chunkMetadata(first).filePath ?? '');
+    const fileName = String(chunkMetadata(first).fileName ?? 'document');
+    if (!agentId || !filePath || !fs.existsSync(filePath)) return;
+
+    const content = await this.parseFile(filePath, fileName);
+    const textChunks = this.chunkText(content);
+    if (textChunks.length === 0) return;
+
+    await removeKnowledgeChunksForFile(mem, agentId, fileId);
+    const fileHash = this.calculateFileHash(filePath);
+    const src = coobotKnowledgeSource(agentId);
+    const batch = textChunks.map((text, index) => ({
+      source: src,
+      title: `${fileName}#${index}`,
+      content: text,
+      metadata: {
+        fileId,
+        fileName,
+        filePath,
+        chunkIndex: index,
+        agentId,
+        fileHash,
+        kind: 'knowledge_upload',
+      },
+    }));
+    await mem.addKnowledgeBatch(batch);
   }
 }
 

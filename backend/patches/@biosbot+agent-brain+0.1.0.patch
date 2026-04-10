@@ -1,5 +1,44 @@
+diff --git a/node_modules/@biosbot/agent-brain/dist/agent-brain.js b/node_modules/@biosbot/agent-brain/dist/agent-brain.js
+index 0e7b599..f7655e2 100644
+--- a/node_modules/@biosbot/agent-brain/dist/agent-brain.js
++++ b/node_modules/@biosbot/agent-brain/dist/agent-brain.js
+@@ -48,16 +48,24 @@ class AgentBrain {
+         this.innateToolHub = new innate_tool_hub_1.InnateToolHub();
+         // Security sandbox
+         this.sandbox = new security_sandbox_1.SecuritySandbox(opts.sandbox);
+-        // Wire ASK handler through the innate tool hub's ask_user mechanism
+-        this.sandbox.setAskHandler(async (request) => {
+-            const question = `[Security Sandbox] Permission required:\n` +
+-                `  Action: ${request.action}\n` +
+-                `  Target: ${request.target}\n` +
+-                (request.detail ? `  Detail: ${request.detail}\n` : '') +
+-                `\nAllow this action? (yes/no)`;
+-            const answer = await this.innateToolHub.requestUserInput(question);
+-            return /^(y|yes|allow|ok|确认|允许|是)$/i.test(answer.trim());
+-        });
++        const customAsk = opts.sandbox && typeof opts.sandbox.askHandler === 'function'
++            ? opts.sandbox.askHandler
++            : undefined;
++        if (customAsk) {
++            this.sandbox.setAskHandler(customAsk);
++        }
++        else {
++            // Wire ASK handler through the innate tool hub's ask_user mechanism
++            this.sandbox.setAskHandler(async (request) => {
++                const question = `[Security Sandbox] Permission required:\n` +
++                    `  Action: ${request.action}\n` +
++                    `  Target: ${request.target}\n` +
++                    (request.detail ? `  Detail: ${request.detail}\n` : '') +
++                    `\nAllow this action? (yes/no)`;
++                const answer = await this.innateToolHub.requestUserInput(question);
++                return /^(y|yes|allow|ok|确认|允许|是)$/i.test(answer.trim());
++            });
++        }
+         this.memory = opts.memory;
+         this.innateToolHub.register(new memory_tools_1.ConversationTrackTool(this.memory));
+         this.innateToolHub.register(new memory_tools_1.ConversationSearchTool(this.memory));
 diff --git a/node_modules/@biosbot/agent-brain/dist/react/react-loop.js b/node_modules/@biosbot/agent-brain/dist/react/react-loop.js
-index 853f14c..5354357 100644
+index 853f14c..496183f 100644
 --- a/node_modules/@biosbot/agent-brain/dist/react/react-loop.js
 +++ b/node_modules/@biosbot/agent-brain/dist/react/react-loop.js
 @@ -157,10 +157,11 @@ class ReactLoop {
@@ -37,3 +76,57 @@ index 853f14c..5354357 100644
                  }
                  catch (err) {
                      controller.recordFailure();
+@@ -210,6 +221,7 @@ class ReactLoop {
+             action,
+             target: resolvedTarget,
+             detail: `${toolName}: ${target}`,
++            toolName,
+         });
+         if (!decision.allowed) {
+             return JSON.stringify({ status: 'denied', tool: toolName, target, reason: decision.reason });
+diff --git a/node_modules/@biosbot/agent-brain/dist/sandbox/security-sandbox.d.ts b/node_modules/@biosbot/agent-brain/dist/sandbox/security-sandbox.d.ts
+index a4950e4..42703bb 100644
+--- a/node_modules/@biosbot/agent-brain/dist/sandbox/security-sandbox.d.ts
++++ b/node_modules/@biosbot/agent-brain/dist/sandbox/security-sandbox.d.ts
+@@ -18,19 +18,12 @@ export interface PermissionRule {
+     /** Permission level */
+     permission: PermissionLevel;
+ }
+-export interface SandboxConfig {
+-    /** Default working directory for all tools. Resolved paths are relative to this.
+-     *  Defaults to `os.tmpdir()/agent-sandbox-<uid>` */
+-    workingDirectory?: string;
+-    /** Default permission level when no rule matches (default: 'ASK') */
+-    defaultPermission?: PermissionLevel;
+-    /** Initial rules applied at construction time */
+-    rules?: PermissionRule[];
+-}
+ export interface PermissionRequest {
+     action: ActionCategory;
+     target: string;
+     detail?: string;
++    /** Tool id being guarded (innate name or `skill.*` / `skill:...` style). */
++    toolName?: string;
+ }
+ export interface PermissionDecision {
+     allowed: boolean;
+@@ -41,6 +34,19 @@ export interface PermissionDecision {
+  * Returns true if the user grants permission, false otherwise.
+  */
+ export type AskHandler = (request: PermissionRequest) => Promise<boolean>;
++export interface SandboxConfig {
++    /** Default working directory for all tools. Resolved paths are relative to this.
++     *  Defaults to `os.tmpdir()/agent-sandbox-<uid>` */
++    workingDirectory?: string;
++    /** Default permission level when no rule matches (default: 'ASK') */
++    defaultPermission?: PermissionLevel;
++    /** Initial rules applied at construction time */
++    rules?: PermissionRule[];
++    /**
++     * When set, replaces the default ask_user-based ASK flow (host UI / HTTP approval, etc.).
++     */
++    askHandler?: AskHandler;
++}
+ export declare class SecuritySandbox {
+     private readonly rules;
+     private readonly defaultPermission;

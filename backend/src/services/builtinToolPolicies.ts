@@ -23,6 +23,16 @@ export const DEFAULT_BUILTIN_TOOL_POLICIES: Record<BuiltinToolName, ToolPolicy> 
   system_info: 'ALLOW',
 };
 
+/** AgentBrain innate tools (no ToolHub twin); align defaults with agent-brain sandbox categories. */
+export const DEFAULT_BRAIN_INNATE_TOOL_POLICIES: Record<string, ToolPolicy> = {
+  fs_delete: 'ASK',
+  fs_mkdir: 'ASK',
+  fs_exists: 'ALLOW',
+  fs_stat: 'ALLOW',
+  fs_search: 'ASK',
+  fs_grep: 'ASK',
+};
+
 export const BUILTIN_TOOL_DESCRIPTIONS: Record<BuiltinToolName, string> = {
   read_file: '读取本地文件',
   write_file: '写入本地文件',

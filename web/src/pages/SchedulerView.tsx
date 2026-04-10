@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { schedulerApi, agentsApi } from '../api';
-import type { ScheduledJob, Agent } from '../types';
+import type { ScheduledJob, AgentBrainCronJob, Agent } from '../types';
 
 const SchedulerView: React.FC = () => {
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
+  const [agentBrainJobs, setAgentBrainJobs] = useState<AgentBrainCronJob[]>([]);
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -20,12 +21,14 @@ const SchedulerView: React.FC = () => {
 
   const load = async () => {
     try {
-      const [j, s, a] = await Promise.all([
+      const [j, ab, s, a] = await Promise.all([
         schedulerApi.getJobs(),
+        schedulerApi.getAgentBrainJobs().catch(() => ({ data: { jobs: [] as AgentBrainCronJob[] } })),
         schedulerApi.getStatus(),
         agentsApi.getAll(),
       ]);
       setJobs(j.data);
+      setAgentBrainJobs(ab.data.jobs ?? []);
       setStatus(s.data as Record<string, unknown>);
       setAgents(a.data.filter(x => x.type !== 'LEADER'));
       if (!form.targetAgentId && a.data.length) {
@@ -117,6 +120,36 @@ const SchedulerView: React.FC = () => {
     }
   };
 
+  const handleDeleteAgentBrain = async (id: string) => {
+    if (!confirm('删除该对话创建的定时任务？')) return;
+    try {
+      await schedulerApi.deleteAgentBrainJob(id);
+      await load();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleTriggerAgentBrain = async (id: string) => {
+    try {
+      await schedulerApi.triggerAgentBrainJob(id);
+      await load();
+      alert('已触发，任务已入队');
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleToggleAgentBrain = async (job: AgentBrainCronJob) => {
+    try {
+      if (job.status === 'active') await schedulerApi.pauseAgentBrainJob(job.id);
+      else await schedulerApi.resumeAgentBrainJob(job.id);
+      await load();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   if (loading) {
     return <div className="page-content">加载中...</div>;
   }
@@ -127,7 +160,8 @@ const SchedulerView: React.FC = () => {
         <div>
           <h1 className="page-title">定时任务</h1>
           <p style={{ color: '#666', fontSize: 14, marginTop: 8 }}>
-            Cron 调度、手动触发与执行历史。调度器状态：{status ? JSON.stringify(status) : '—'}
+            Cron 调度、手动触发与执行历史。下方「对话定时任务」为聊天里 Agent 通过内置{' '}
+            <code>cron_add</code> 创建的任务。调度器状态：{status ? JSON.stringify(status) : '—'}
           </p>
         </div>
         <button type="button" className="btn btn-primary" onClick={() => setShowCreate(!showCreate)}>
@@ -181,7 +215,61 @@ const SchedulerView: React.FC = () => {
       )}
 
       <div className="settings-section">
-        <h3 className="settings-section-title">任务列表</h3>
+        <h3 className="settings-section-title">对话定时任务（AgentBrain）</h3>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: 'left', borderBottom: '1px solid #eee' }}>
+                <th style={{ padding: 8 }}>名称</th>
+                <th style={{ padding: 8 }}>Cron (UTC)</th>
+                <th style={{ padding: 8 }}>触发内容</th>
+                <th style={{ padding: 8 }}>状态</th>
+                <th style={{ padding: 8 }}>下次运行</th>
+                <th style={{ padding: 8 }}>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {agentBrainJobs.map((job) => (
+                <tr key={job.id} style={{ borderBottom: '1px solid #f5f5f5' }}>
+                  <td style={{ padding: 8 }}>{job.name || '—'}</td>
+                  <td style={{ padding: 8 }}>
+                    <code>{job.cronExpression}</code>
+                  </td>
+                  <td
+                    style={{ padding: 8, maxWidth: 280, wordBreak: 'break-word' }}
+                    title={job.command}
+                  >
+                    {job.command.length > 120 ? `${job.command.slice(0, 120)}…` : job.command}
+                  </td>
+                  <td style={{ padding: 8 }}>{job.status === 'active' ? '运行中' : job.status === 'paused' ? '已暂停' : job.status}</td>
+                  <td style={{ padding: 8 }}>
+                    {job.nextRunTime
+                      ? new Date(job.nextRunTime).toLocaleString('zh-CN')
+                      : '—'}
+                  </td>
+                  <td style={{ padding: 8, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    <button type="button" className="btn btn-sm" onClick={() => void handleTriggerAgentBrain(job.id)}>
+                      立即触发
+                    </button>
+                    <button type="button" className="btn btn-sm" onClick={() => void handleToggleAgentBrain(job)}>
+                      {job.status === 'active' ? '暂停' : '恢复'}
+                    </button>
+                    <button type="button" className="btn btn-sm" onClick={() => void handleDeleteAgentBrain(job.id)}>
+                      删除
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {agentBrainJobs.length === 0 && (
+            <div style={{ padding: 16, color: '#999' }}>暂无对话创建的定时任务</div>
+          )}
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <h3 className="settings-section-title">手动创建的定时任务</h3>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>

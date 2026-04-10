@@ -67,6 +67,15 @@ export class LeaderAgent extends EventEmitter {
         subtaskCount: taskAnalysis.subtasks.length
       });
 
+      if (
+        taskAnalysis.leaderUsage &&
+        (taskAnalysis.leaderUsage.total > 0 ||
+          taskAnalysis.leaderUsage.prompt > 0 ||
+          taskAnalysis.leaderUsage.completion > 0)
+      ) {
+        await taskOrchestrator.addLlmTokens(task.id, taskAnalysis.leaderUsage);
+      }
+
       if (taskAnalysis.confidenceScore < DEFAULT_CONFIDENCE_THRESHOLD || taskAnalysis.subtasks.length === 0) {
         const questions = taskAnalysis.clarificationQuestions || ['请提供更多信息以便我更好地理解您的需求'];
         await taskOrchestrator.mergeInputPayloadFields(task.id, { clarificationQuestions: questions });
@@ -144,6 +153,7 @@ export class LeaderAgent extends EventEmitter {
     refinedGoal: string;
     clarificationQuestions: string[];
     subtasks: DAGNode[];
+    leaderUsage: { prompt: number; completion: number; total: number };
   }> {
     const context = await memoryEngine.getActiveHistory(5);
     const historyText = context.map(h => `${h.role}: ${h.content}`).join('\n');
@@ -176,7 +186,7 @@ export class LeaderAgent extends EventEmitter {
     });
 
     try {
-      const response = await this.callLeaderModel(prompt);
+      const { text: response, usage } = await this.callLeaderModel(prompt);
       const cleanedResponse = response.replace(/```json\n?/g, '').replace(/```\n?$/g, '').trim();
       const result = JSON.parse(cleanedResponse);
 
@@ -186,6 +196,7 @@ export class LeaderAgent extends EventEmitter {
         refinedGoal: result.refinedGoal || userInput,
         clarificationQuestions: result.clarificationQuestions || [],
         subtasks: result.subtasks || [],
+        leaderUsage: usage,
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -194,7 +205,10 @@ export class LeaderAgent extends EventEmitter {
     }
   }
 
-  private async callLeaderModel(prompt: string): Promise<string> {
+  private async callLeaderModel(prompt: string): Promise<{
+    text: string;
+    usage: { prompt: number; completion: number; total: number };
+  }> {
     logger.info('LeaderAgent', 'Calling leader model', { promptLength: prompt.length });
 
     try {
@@ -246,8 +260,14 @@ export class LeaderAgent extends EventEmitter {
       if (!result) {
         throw new Error('Model returned empty response');
       }
+      const u = response.usage;
+      const usage = {
+        prompt: u?.prompt_tokens ?? 0,
+        completion: u?.completion_tokens ?? 0,
+        total: u?.total_tokens ?? (u?.prompt_tokens ?? 0) + (u?.completion_tokens ?? 0),
+      };
       logger.debug('LeaderAgent', 'LLM output', { model: modelConfig.modelName, output: result });
-      return result;
+      return { text: result, usage };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       logger.error('LeaderAgent', 'Model call failed', error);
