@@ -29,6 +29,24 @@ export class MemoryEngine {
     return messageId;
   }
 
+  /**
+   * Whether this task already has a user-role row with the same trimmed content
+   * (e.g. POST /chat already stored the utterance with relatedTaskId).
+   */
+  async hasUserMessageForTask(taskId: string, content: string): Promise<boolean> {
+    const rows = await db
+      .select({ content: schema.sessionMemory.content })
+      .from(schema.sessionMemory)
+      .where(
+        and(
+          eq(schema.sessionMemory.relatedTaskId, taskId),
+          eq(schema.sessionMemory.role, 'user')
+        )
+      );
+    const t = content.trim();
+    return rows.some((r) => (r.content ?? '').trim() === t);
+  }
+
   async getActiveHistory(limit: number = 20): Promise<SessionMessage[]> {
     return await db.select()
       .from(schema.sessionMemory)

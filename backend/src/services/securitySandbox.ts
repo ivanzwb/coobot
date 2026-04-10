@@ -52,6 +52,46 @@ export class SecuritySandbox {
     return { policy: 'ALLOW' };
   }
 
+  /** NFKC + trim + ASCII lower — DB / UI / 模型侧技能名或 id 略有差异时仍能命中权限行。 */
+  private normPolicyKey(s: string): string {
+    return s.normalize('NFKC').trim().toLowerCase();
+  }
+
+  private findPermissionRow(
+    permissions: { toolName: string; policy: string }[],
+    candidate: string
+  ): { toolName: string; policy: string } | undefined {
+    const want = this.normPolicyKey(candidate);
+    return permissions.find((p) => this.normPolicyKey(p.toolName) === want);
+  }
+
+  /**
+   * segment 可为 skills.id 或 skills.name（与 AgentBrain / 配置页一致）；返回 Hub 键 `skill:{name}:{logical}`。
+   */
+  private async resolveAssignedSkillHubKey(
+    agentId: string,
+    segment: string,
+    logical: string
+  ): Promise<string | null> {
+    if (!segment || !logical) return null;
+
+    const rows = await db
+      .select({ id: schema.skills.id, name: schema.skills.name })
+      .from(schema.agentSkills)
+      .innerJoin(schema.skills, eq(schema.agentSkills.skillId, schema.skills.id))
+      .where(
+        and(eq(schema.agentSkills.agentId, agentId), eq(schema.skills.enabled, true))
+      );
+
+    const ns = this.normPolicyKey(segment);
+    for (const r of rows) {
+      if (this.normPolicyKey(r.id) === ns || this.normPolicyKey(r.name) === ns) {
+        return skillToolHubKey(r.name, logical);
+      }
+    }
+    return null;
+  }
+
   /**
    * AgentBrain 使用 `skill.{segment}.{logical}`；权限表存 `skill:{skill.name}:{logical}`。
    * segment 可能是 skills.id（目录名）或 name，与配置页上的键必须能对上。
@@ -68,20 +108,7 @@ export class SecuritySandbox {
     const logical = rest.slice(idx + 1);
     if (!logical) return null;
 
-    const rows = await db
-      .select({ id: schema.skills.id, name: schema.skills.name })
-      .from(schema.agentSkills)
-      .innerJoin(schema.skills, eq(schema.agentSkills.skillId, schema.skills.id))
-      .where(
-        and(eq(schema.agentSkills.agentId, agentId), eq(schema.skills.enabled, true))
-      );
-
-    for (const r of rows) {
-      if (r.id === seg || r.name === seg) {
-        return skillToolHubKey(r.name, logical);
-      }
-    }
-    return null;
+    return this.resolveAssignedSkillHubKey(agentId, seg, logical);
   }
 
   private async expandPolicyCandidates(
@@ -106,6 +133,11 @@ export class SecuritySandbox {
     for (const n of raw) {
       if (n.startsWith('skill:')) {
         add(resolveSkillToolHubName(n));
+        const m = n.match(/^skill:([^:]+):(.+)$/);
+        if (m) {
+          const mapped = await this.resolveAssignedSkillHubKey(agentId, m[1], m[2]);
+          add(mapped);
+        }
       }
       if (n.startsWith('skill.')) {
         const rest = n.slice('skill.'.length);
@@ -137,7 +169,7 @@ export class SecuritySandbox {
     const candidates = await this.expandPolicyCandidates(agentId, toolName, alternateToolNames);
 
     for (const name of candidates) {
-      const toolPerm = permissions.find((p) => p.toolName === name);
+      const toolPerm = this.findPermissionRow(permissions, name);
       if (toolPerm) {
         return toolPerm.policy as ToolPolicy;
       }

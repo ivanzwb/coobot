@@ -120,7 +120,17 @@ export class AgentRuntime extends EventEmitter {
         timestamp: new Date(),
       });
 
-      await memoryEngine.appendMessage('user', userRequest, [], task.id);
+      // Chat POST 已把用户原话记为 user；Leader 子任务会带 refinedGoal，不应再标成「你」。
+      const trimmed = userRequest.trim();
+      const userLineAlreadyStored = await memoryEngine.hasUserMessageForTask(task.id, trimmed);
+      if (!userLineAlreadyStored) {
+        await memoryEngine.appendMessage(
+          'system',
+          `【任务说明】\n${userRequest}`,
+          [],
+          task.id
+        );
+      }
 
       coobotBrainSession.reset(task.id, agentConfig.id, agentConfig.skills);
       const agentMem = await ensureAgentMemory();
