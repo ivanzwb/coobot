@@ -5,7 +5,8 @@ import type {
   Model,
   KnowledgeFile,
   Message,
-  LongTermMemory,
+  UnifiedLtmItem,
+  CreateLtmPayload,
   ScheduledJob,
   AgentBrainCronJob,
   AgentMetrics,
@@ -111,11 +112,11 @@ export const memoryApi = {
   getHistory: (limit?: number, offset?: number) =>
     api.get<Message[]>('/memory/history', { params: { limit, offset } }),
   getStm: (limit?: number) => api.get<Message[]>('/memory/stm', { params: { limit } }),
-  getLtm: (agentId?: string) => api.get<LongTermMemory[]>('/memory/ltm', { params: { agentId } }),
-  createLtm: (data: Partial<LongTermMemory>) => api.post('/memory/ltm', data),
+  getLtm: (agentId?: string) => api.get<UnifiedLtmItem[]>('/memory/ltm', { params: { agentId } }),
+  createLtm: (data: CreateLtmPayload) => api.post('/memory/ltm', data),
   deleteLtm: (id: string) => api.delete(`/memory/ltm/${id}`),
-  searchLtm: (query: string, agentId: string, topK?: number) =>
-    api.get('/memory/ltm/search', { params: { query, agentId, topK } }),
+  searchLtm: (query: string, agentId?: string, topK?: number) =>
+    api.get<UnifiedLtmItem[]>('/memory/ltm/search', { params: { query, agentId, topK } }),
 };
 
 export const systemApi = {

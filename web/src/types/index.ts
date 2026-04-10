@@ -127,6 +127,56 @@ export interface LongTermMemory {
   createdAt: string;
 }
 
+/** 合并 Coobot Drizzle LTM 与 `@biosbot/agent-memory` 长期记忆（记忆管理列表）。 */
+export interface UnifiedLtmItem {
+  id: string;
+  store: 'agent-memory' | 'coobot';
+  category: string;
+  key: string;
+  value: string;
+  agentId?: string | null;
+  confidence?: number;
+  accessCount?: number;
+  lastAccessed?: string | null;
+  isActive?: boolean;
+  createdAt?: string | null;
+  score?: number;
+}
+
+export interface MemoryDashboardData {
+  stm: {
+    activeCount: number;
+    archivedCount: number;
+    recentMessages: { role: string; content: string; timestamp: string }[];
+  };
+  ltm: {
+    totalCount: number;
+    byCategory: Record<string, number>;
+    coobotTotal: number;
+    brainLtmActive: number;
+    brainLtmDormant: number;
+  };
+  agentMemory: {
+    stats: {
+      conversation: { activeCount: number; archivedCount: number };
+      longTerm: { activeCount: number; dormantCount: number; deletedCount: number };
+      knowledge: { chunkCount: number; sourceCount: number };
+      storage: { sqliteBytes: number; vectorIndexBytes: number };
+    };
+    recentMessages: { conversationId: string; role: string; content: string; createdAt: string }[];
+    knowledgePreview: { id: string; source: string; title: string; preview: string }[];
+  } | null;
+}
+
+export type CreateLtmPayload = {
+  store?: 'agent-memory' | 'coobot';
+  agentId?: string;
+  category: string;
+  key: string;
+  value: string;
+  confidence?: number;
+};
+
 export interface ScheduledJob {
   id: string;
   name: string;

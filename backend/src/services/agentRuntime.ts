@@ -343,13 +343,6 @@ export class AgentRuntime extends EventEmitter {
     }
     parts.push(`\nAlways respond in the same language as the user's input.`);
 
-    parts.push(
-      `\n## Host environment (BiosBot)\n` +
-        `- Recurring reminders and in-app scheduling use the built-in **cron_** tools (e.g. \`cron_add\` with a standard cron expression, UTC).\n` +
-        `- Do **not** call \`ask_user\` to ask which phone, PC, or third-party app to use unless the user explicitly needs an integration outside this application.\n` +
-        `- When the user only needs a reminder inside this product, pick the cron tools directly without platform clarification.`
-    );
-
     if (agentConfig.capabilityBoundary) {
       parts.push(`\nCapability Boundaries:\n${agentConfig.capabilityBoundary}`);
     }
