@@ -107,9 +107,7 @@ export class CoobotCronHub implements CronHub {
     this.jobs.clear();
   }
 
-  async cron_list(args: Record<string, unknown>): Promise<string> {
-    const status = typeof args.status === 'string' ? args.status : undefined;
-    const limit = typeof args.limit === 'number' ? args.limit : 20;
+  async cron_list(status?: string, limit = 20): Promise<string> {
     let rows = Array.from(this.jobs.values());
     if (status) {
       rows = rows.filter((j) => j.status === status);
@@ -118,11 +116,16 @@ export class CoobotCronHub implements CronHub {
     return JSON.stringify({ status: 'ok', count: jobs.length, jobs });
   }
 
-  async cron_add(args: Record<string, unknown>): Promise<string> {
-    const name = String(args.name ?? '');
-    const cronExpression = String(args.cronExpression ?? '');
-    const command = String(args.command ?? '');
-    const trimmed = cronExpression.trim();
+  async cron_add(
+    name: string,
+    cronExpression: string,
+    command: string,
+    resolvedResources?: Record<string, unknown>
+  ): Promise<string> {
+    const jobName = String(name ?? '');
+    const expr = String(cronExpression ?? '');
+    const cmd = String(command ?? '');
+    const trimmed = expr.trim();
     const probe = computeNextRunIso(trimmed, new Date());
     if (probe === undefined) {
       return JSON.stringify({
@@ -135,12 +138,13 @@ export class CoobotCronHub implements CronHub {
     const id = `job_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
     const job: InternalJob = {
       id,
-      name,
+      name: jobName,
       cronExpression: trimmed,
-      command,
+      command: cmd,
       status: 'active',
       createdAt: new Date().toISOString(),
       nextRunTime: probe,
+      resolvedResources,
     };
     this.jobs.set(id, job);
     this.armTimer(job);
@@ -148,14 +152,13 @@ export class CoobotCronHub implements CronHub {
     return JSON.stringify({
       status: 'ok',
       id,
-      name,
+      name: jobName,
       cronExpression: trimmed,
       nextRunTime: job.nextRunTime,
     });
   }
 
-  async cron_delete(args: Record<string, unknown>): Promise<string> {
-    const id = String(args.id ?? '');
+  async cron_delete(id: string): Promise<string> {
     const job = this.jobs.get(id);
     if (!job) {
       return JSON.stringify({ status: 'error', message: `Job ${id} not found` });
@@ -168,8 +171,7 @@ export class CoobotCronHub implements CronHub {
     return JSON.stringify({ status: 'ok', id });
   }
 
-  async cron_pause(args: Record<string, unknown>): Promise<string> {
-    const id = String(args.id ?? '');
+  async cron_pause(id: string): Promise<string> {
     const job = this.jobs.get(id);
     if (!job) {
       return JSON.stringify({ status: 'error', message: `Job ${id} not found` });
@@ -181,8 +183,7 @@ export class CoobotCronHub implements CronHub {
     return JSON.stringify({ status: 'ok', id });
   }
 
-  async cron_resume(args: Record<string, unknown>): Promise<string> {
-    const id = String(args.id ?? '');
+  async cron_resume(id: string): Promise<string> {
     const job = this.jobs.get(id);
     if (!job) {
       return JSON.stringify({ status: 'error', message: `Job ${id} not found` });
@@ -195,8 +196,7 @@ export class CoobotCronHub implements CronHub {
     return JSON.stringify({ status: 'ok', id, nextRunTime: job.nextRunTime });
   }
 
-  async cron_run_now(args: Record<string, unknown>): Promise<string> {
-    const id = String(args.id ?? '');
+  async cron_run_now(id: string): Promise<string> {
     const job = this.jobs.get(id);
     if (!job) {
       return JSON.stringify({ status: 'error', message: `Job ${id} not found` });

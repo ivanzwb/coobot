@@ -1,289 +1,251 @@
-import { db, schema } from '../db';
-import { eq, and, gte, lt, desc } from 'drizzle-orm';
-import type { MemoryCategory, LtmQueryResult } from '../types';
-import type { SessionMessage, LongTermMemory } from '../db';
+import * as fs from 'fs';
+import * as path from 'path';
+import Database from 'better-sqlite3';
+import { eq } from 'drizzle-orm';
+import type { SessionMessage } from '../db';
+import { db, schema } from '../db/index.js';
+import { ensureAgentMemoryForAgent, runMaintenanceAllAgentMemories } from './agentBrain/agentMemoryBootstrap.js';
+import { getAgentMemoryDataDir } from './agentBrain/agentWorkspaceLayout.js';
 import { logger } from './logger.js';
 
+/** Messages with no task (e.g. session boundary) go to LEADER. */
+const GLOBAL_CONV = 'coobot:global';
+
+type ConvRow = {
+  id: number;
+  conversation_id: string;
+  role: string;
+  content: string;
+  metadata: string | null;
+  is_archived: number;
+  created_at: number;
+};
+
+async function resolveTaskAssignedAgentId(taskId: string): Promise<string> {
+  const rows = await db
+    .select({ assignedAgentId: schema.tasks.assignedAgentId })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId))
+    .limit(1);
+  return rows[0]?.assignedAgentId ?? 'LEADER';
+}
+
+async function listRegisteredAgentIds(): Promise<string[]> {
+  const rows = await db.select({ id: schema.agents.id }).from(schema.agents);
+  return rows.map((r) => r.id);
+}
+
+function agentMemoryDbPath(agentId: string): string {
+  return path.join(getAgentMemoryDataDir(agentId), 'memory.db');
+}
+
+function parseMeta(raw: string | null): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function rowToSessionMessage(row: ConvRow): SessionMessage {
+  const meta = parseMeta(row.metadata);
+  const attachments = meta.attachments;
+  const taskId = typeof meta.taskId === 'string' ? meta.taskId : undefined;
+  return {
+    id: row.id,
+    role: row.role as SessionMessage['role'],
+    content: row.content,
+    attachmentsJson: attachments != null ? JSON.stringify(attachments) : null,
+    relatedTaskId: taskId ?? (row.conversation_id !== GLOBAL_CONV ? row.conversation_id : null),
+    metaJson: null,
+    summary: null,
+    tokenCount: 0,
+    importance: 0.5,
+    createdAt: new Date(row.created_at),
+    isArchived: Boolean(row.is_archived),
+    ltmRefId: null,
+  } as SessionMessage;
+}
+
+function openMemoryDbReadonly(agentId: string): Database.Database | null {
+  try {
+    const p = agentMemoryDbPath(agentId);
+    if (!fs.existsSync(p)) return null;
+    return new Database(p, { readonly: true, fileMustExist: true });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Chat / UI session log + Leader context. Each agent has its own `agents/<id>/memory/memory.db`.
+ */
 export class MemoryEngine {
-  private timeWindowHours: number = 24;
-  private minCountThreshold: number = 5;
-
-  async appendMessage(role: 'user' | 'assistant' | 'system', content: string, attachments?: Record<string, unknown>[], relatedTaskId?: string): Promise<number> {
-    logger.debug('MemoryEngine', `Appending ${role} message`, { relatedTaskId, contentLength: content.length });
-    
-    const tokenCount = this.estimateTokenCount(content);
-    
-    const result = await db.insert(schema.sessionMemory).values({
-      role,
-      content,
-      attachmentsJson: attachments ? JSON.stringify(attachments) : null,
-      relatedTaskId: relatedTaskId || null,
-      tokenCount,
-      isArchived: false,
-      createdAt: new Date(),
+  async appendMessage(
+    role: 'user' | 'assistant' | 'system',
+    content: string,
+    attachments?: Record<string, unknown>[],
+    relatedTaskId?: string,
+    explicitAgentId?: string
+  ): Promise<number> {
+    let agentId = explicitAgentId;
+    if (!agentId) {
+      agentId = relatedTaskId?.trim()
+        ? await resolveTaskAssignedAgentId(relatedTaskId.trim())
+        : 'LEADER';
+    }
+    const mem = await ensureAgentMemoryForAgent(agentId);
+    const conversationId = relatedTaskId?.trim() || GLOBAL_CONV;
+    const metadata: Record<string, unknown> = { taskId: relatedTaskId ?? undefined };
+    if (attachments && attachments.length > 0) {
+      metadata.attachments = attachments;
+    }
+    logger.debug('MemoryEngine', `Appending ${role} message (agent-memory)`, {
+      agentId,
+      relatedTaskId,
+      contentLength: content.length,
     });
-
-    const messageId = result.lastInsertRowid as number;
-    logger.debug('MemoryEngine', `${role} message saved`, { messageId, relatedTaskId });
-    
-    return messageId;
+    return mem.appendMessage(conversationId, role, content, metadata);
   }
 
-  /**
-   * Whether this task already has a user-role row with the same trimmed content
-   * (e.g. POST /chat already stored the utterance with relatedTaskId).
-   */
   async hasUserMessageForTask(taskId: string, content: string): Promise<boolean> {
-    const rows = await db
-      .select({ content: schema.sessionMemory.content })
-      .from(schema.sessionMemory)
-      .where(
-        and(
-          eq(schema.sessionMemory.relatedTaskId, taskId),
-          eq(schema.sessionMemory.role, 'user')
-        )
-      );
+    const agentId = await resolveTaskAssignedAgentId(taskId);
+    const mem = await ensureAgentMemoryForAgent(agentId);
+    const msgs = await mem.getConversation(taskId, 200);
     const t = content.trim();
-    return rows.some((r) => (r.content ?? '').trim() === t);
+    return msgs.some((m) => m.role === 'user' && m.content.trim() === t);
   }
 
-  async getActiveHistory(limit: number = 20): Promise<SessionMessage[]> {
-    return await db.select()
-      .from(schema.sessionMemory)
-      .where(eq(schema.sessionMemory.isArchived, false))
-      .orderBy(schema.sessionMemory.createdAt)
-      .limit(limit) as unknown as SessionMessage[];
+  async getActiveHistory(limit: number = 20, agentId: string = 'LEADER'): Promise<SessionMessage[]> {
+    const dbro = openMemoryDbReadonly(agentId);
+    if (!dbro) return [];
+    try {
+      const rows = dbro
+        .prepare(
+          `SELECT id, conversation_id, role, content, metadata, is_archived, created_at
+           FROM conversations WHERE is_archived = 0 ORDER BY created_at ASC LIMIT ?`
+        )
+        .all(limit) as ConvRow[];
+      return rows.map(rowToSessionMessage);
+    } finally {
+      dbro.close();
+    }
   }
 
-  /**
-   * Oldest-first page (offset from start of table). Used by Memory admin `/history` pagination.
-   */
-  async getAllHistory(limit: number = 100, offset: number = 0): Promise<SessionMessage[]> {
-    return await db.select()
-      .from(schema.sessionMemory)
-      .orderBy(schema.sessionMemory.createdAt)
-      .limit(limit)
-      .offset(offset) as unknown as SessionMessage[];
+  async getAllHistory(limit: number = 100, offset: number = 0, agentId?: string): Promise<SessionMessage[]> {
+    if (agentId) {
+      const dbro = openMemoryDbReadonly(agentId);
+      if (!dbro) return [];
+      try {
+        const rows = dbro
+          .prepare(
+            `SELECT id, conversation_id, role, content, metadata, is_archived, created_at
+             FROM conversations ORDER BY created_at ASC LIMIT ? OFFSET ?`
+          )
+          .all(limit, offset) as ConvRow[];
+        return rows.map(rowToSessionMessage);
+      } finally {
+        dbro.close();
+      }
+    }
+    return this.mergeAllAgentsHistory(limit, offset);
   }
 
-  /**
-   * Latest messages for chat UI: newest rows first from DB, then reversed to chronological order.
-   */
-  async getRecentChatHistory(limit: number = 50, offset: number = 0): Promise<SessionMessage[]> {
-    const rows = await db.select()
-      .from(schema.sessionMemory)
-      .orderBy(desc(schema.sessionMemory.createdAt))
-      .limit(limit)
-      .offset(offset);
-    return [...rows].reverse() as unknown as SessionMessage[];
+  private async mergeAllAgentsHistory(limit: number, offset: number): Promise<SessionMessage[]> {
+    const agentIds = await listRegisteredAgentIds();
+    type Tagged = { row: ConvRow; ts: number };
+    const all: Tagged[] = [];
+    for (const aid of agentIds) {
+      const dbro = openMemoryDbReadonly(aid);
+      if (!dbro) continue;
+      try {
+        const rows = dbro
+          .prepare(
+            `SELECT id, conversation_id, role, content, metadata, is_archived, created_at
+             FROM conversations ORDER BY created_at ASC`
+          )
+          .all() as ConvRow[];
+        for (const row of rows) {
+          all.push({ row, ts: row.created_at });
+        }
+      } finally {
+        dbro.close();
+      }
+    }
+    all.sort((a, b) => a.ts - b.ts);
+    return all.slice(offset, offset + limit).map((x) => rowToSessionMessage(x.row));
   }
 
-  /** Full session log in chronological order (e.g. chat export). */
-  async getAllSessionMessagesChronological(): Promise<SessionMessage[]> {
-    return await db.select()
-      .from(schema.sessionMemory)
-      .orderBy(schema.sessionMemory.createdAt) as unknown as SessionMessage[];
+  async getRecentChatHistory(limit: number = 50, offset: number = 0, agentId?: string): Promise<SessionMessage[]> {
+    if (agentId) {
+      const dbro = openMemoryDbReadonly(agentId);
+      if (!dbro) return [];
+      try {
+        const rows = dbro
+          .prepare(
+            `SELECT id, conversation_id, role, content, metadata, is_archived, created_at
+             FROM conversations WHERE is_archived = 0
+             ORDER BY created_at DESC LIMIT ? OFFSET ?`
+          )
+          .all(limit, offset) as ConvRow[];
+        return [...rows].reverse().map(rowToSessionMessage);
+      } finally {
+        dbro.close();
+      }
+    }
+    return this.mergeRecentAcrossAgents(limit, offset);
   }
 
-  private estimateTokenCount(text: string): number {
-    return Math.ceil(text.length / 4);
+  private async mergeRecentAcrossAgents(limit: number, offset: number): Promise<SessionMessage[]> {
+    const agentIds = await listRegisteredAgentIds();
+    const perCap = Math.min(500, Math.max(limit + offset, 50));
+    type Tagged = { row: ConvRow; ts: number };
+    const pool: Tagged[] = [];
+    for (const aid of agentIds) {
+      const dbro = openMemoryDbReadonly(aid);
+      if (!dbro) continue;
+      try {
+        const rows = dbro
+          .prepare(
+            `SELECT id, conversation_id, role, content, metadata, is_archived, created_at
+             FROM conversations WHERE is_archived = 0
+             ORDER BY created_at DESC LIMIT ?`
+          )
+          .all(perCap) as ConvRow[];
+        for (const row of rows) {
+          pool.push({ row, ts: row.created_at });
+        }
+      } finally {
+        dbro.close();
+      }
+    }
+    pool.sort((a, b) => b.ts - a.ts);
+    const sliced = pool.slice(offset, offset + limit);
+    return [...sliced].reverse().map((x) => rowToSessionMessage(x.row));
+  }
+
+  async getAllSessionMessagesChronological(agentId?: string): Promise<SessionMessage[]> {
+    if (agentId) {
+      const dbro = openMemoryDbReadonly(agentId);
+      if (!dbro) return [];
+      try {
+        const rows = dbro
+          .prepare(
+            `SELECT id, conversation_id, role, content, metadata, is_archived, created_at
+             FROM conversations ORDER BY created_at ASC`
+          )
+          .all() as ConvRow[];
+        return rows.map(rowToSessionMessage);
+      } finally {
+        dbro.close();
+      }
+    }
+    return this.mergeAllAgentsHistory(1_000_000, 0);
   }
 
   async archiveEligibleHistory(): Promise<void> {
-    const cutoffTime = new Date(Date.now() - this.timeWindowHours * 3600 * 1000);
-    
-    const eligibleRecords = await db.select()
-      .from(schema.sessionMemory)
-      .where(
-        and(
-          eq(schema.sessionMemory.isArchived, false),
-          lt(schema.sessionMemory.createdAt, cutoffTime)
-        )
-      );
-
-    if (eligibleRecords.length <= this.minCountThreshold) {
-      return;
-    }
-
-    const batchToArchive = eligibleRecords.slice(0, 20);
-    await this.processBatchArchive(batchToArchive);
-  }
-
-  private async processBatchArchive(records: SessionMessage[]): Promise<void> {
-    const contextText = records.map(r => `${r.role}: ${r.content}`).join('\n');
-    const summary = `Archive containing ${records.length} messages from ${records[0].createdAt ? new Date(records[0].createdAt).toISOString() : 'unknown'}`;
-
-    const ltmId = await this.saveToLtm({
-      agentId: 'LEADER',
-      category: 'summary',
-      key: `History Summary ${new Date().toISOString()}`,
-      value: summary,
-      sourceType: 'chat_history_archive',
-    });
-
-    const ids = records.map(r => r.id);
-    await db.update(schema.sessionMemory)
-      .set({
-        isArchived: true,
-        ltmRefId: ltmId,
-        summary,
-      })
-      .where(
-        and(
-          eq(schema.sessionMemory.isArchived, false),
-          gte(schema.sessionMemory.createdAt, new Date(0))
-        )
-      );
-  }
-
-  async saveToLtm(params: {
-    agentId: string;
-    category: MemoryCategory;
-    key: string;
-    value: string;
-    sourceType?: string;
-    confidence?: number;
-  }): Promise<string> {
-    const id = `ltm_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    
-    await db.insert(schema.longTermMemory).values({
-      id,
-      agentId: params.agentId,
-      category: params.category,
-      key: params.key,
-      value: params.value,
-      embeddingId: id,
-      confidence: params.confidence || 0.8,
-      accessCount: 0,
-      lastAccessed: new Date(),
-      isActive: true,
-      createdAt: new Date(),
-    });
-
-    return id;
-  }
-
-  async addFact(agentId: string, category: string, value: string, metadata?: Record<string, unknown>): Promise<string> {
-    const key = `${category}_${Date.now()}`;
-    const id = await this.saveToLtm({
-      agentId,
-      category: category as MemoryCategory,
-      key,
-      value,
-      sourceType: 'task_completion',
-      confidence: 0.7,
-    });
-    return id;
-  }
-
-  async searchLtm(params: { query: string; agentId: string; topK?: number }): Promise<LtmQueryResult[]> {
-    const topK = params.topK || 3;
-    const results = await db.select()
-      .from(schema.longTermMemory)
-      .where(
-        and(
-          eq(schema.longTermMemory.agentId, params.agentId),
-          eq(schema.longTermMemory.isActive, true)
-        )
-      )
-      .limit(topK);
-
-    return results.map(r => ({
-      id: r.id,
-      content: r.value,
-      matchScore: r.confidence || 0.5,
-      timestamp: r.createdAt ? new Date(r.createdAt) : new Date(),
-      type: r.category as 'fact' | 'preference' | 'session_summary',
-    }));
-  }
-
-  async deleteLtm(id: string): Promise<void> {
-    await db.update(schema.longTermMemory)
-      .set({ isActive: false })
-      .where(eq(schema.longTermMemory.id, id));
-  }
-
-  async getLtmList(agentId?: string): Promise<LongTermMemory[]> {
-    const condition = agentId 
-      ? and(eq(schema.longTermMemory.agentId, agentId), eq(schema.longTermMemory.isActive, true))
-      : eq(schema.longTermMemory.isActive, true);
-    
-    return await db.select()
-      .from(schema.longTermMemory)
-      .where(condition) as unknown as LongTermMemory[];
-  }
-
-  async updateLtmAccessCount(id: string): Promise<void> {
-    const record = await db.select().from(schema.longTermMemory).where(eq(schema.longTermMemory.id, id)).limit(1);
-    if (record.length > 0) {
-      await db.update(schema.longTermMemory)
-        .set({
-          accessCount: (record[0].accessCount || 0) + 1,
-          lastAccessed: new Date(),
-        })
-        .where(eq(schema.longTermMemory.id, id));
-    }
-  }
-
-  async extractFactsFromConversation(userMessage: string, agentId: string): Promise<string[]> {
-    const extractedFacts: string[] = [];
-    
-    const preferencePatterns = [
-      /(?:I prefer|I always use|I like to use|I want to use|默认用|喜欢用|偏好)(.+?)(?:\.|，|$)/gi,
-      /(?:不要|别|禁止|不要使用|不要用)(.+?)(?:\.|，|$)/gi,
-    ];
-
-    for (const pattern of preferencePatterns) {
-      const matches = [...userMessage.matchAll(pattern)];
-      for (const match of matches) {
-        if (match[1]) {
-          const fact = match[1].trim();
-          extractedFacts.push(fact);
-          await this.addFact(agentId, 'preference', fact);
-        }
-      }
-    }
-
-    const projectPatterns = [
-      /(?:project|项目)(?:\s*:|\s+is|\s+名称)(?:\s*:|\s+)?(.+?)(?:\.|，|$)/gi,
-    ];
-
-    for (const pattern of projectPatterns) {
-      const matches = [...userMessage.matchAll(pattern)];
-      for (const match of matches) {
-        if (match[1]) {
-          const fact = `Project: ${match[1].trim()}`;
-          extractedFacts.push(fact);
-          await this.addFact(agentId, 'fact', fact);
-        }
-      }
-    }
-
-    return extractedFacts;
-  }
-
-  async getMemoryContext(agentId: string, query: string): Promise<{
-    stmContext: string;
-    ltmContext: string;
-  }> {
-    const stmHistory = await this.getActiveHistory(10);
-    const stmContext = stmHistory
-      .map(h => `${h.role}: ${h.content}`)
-      .join('\n');
-
-    const ltmResults = await this.searchLtm({
-      query,
-      agentId,
-      topK: 3,
-    });
-    const ltmContext = ltmResults
-      .map(r => `[${r.type}] ${r.content}`)
-      .join('\n');
-
-    return {
-      stmContext: stmContext.substring(0, 2000),
-      ltmContext: ltmContext.substring(0, 1000),
-    };
+    await runMaintenanceAllAgentMemories();
   }
 }
 

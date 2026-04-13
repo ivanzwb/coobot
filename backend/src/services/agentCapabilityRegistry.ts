@@ -2,14 +2,14 @@ import { db, schema } from '../db';
 import { eq } from 'drizzle-orm';
 import type { DomainAgentProfile } from '../types';
 import { getSkillNamesForAgent } from '../db/agentSkillQueries.js';
-import { toolHub } from './toolHub.js';
+import { listBuiltinToolNames } from './builtinToolCatalog.js';
 
 export class AgentCapabilityRegistry {
   private agentProfiles: Map<string, DomainAgentProfile> = new Map();
 
   /** Builtin tools only; `skill:*` (SkillToolImpl) are not part of agent “default toolkit” metadata. */
   private builtinToolNames(): string[] {
-    return toolHub.listBuiltinTools().map((t) => t.name);
+    return listBuiltinToolNames();
   }
 
   async register(profile: DomainAgentProfile): Promise<void> {

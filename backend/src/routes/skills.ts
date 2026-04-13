@@ -146,7 +146,9 @@ router.post('/import', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Provide previewId or zip file content' });
     }
 
-    const result = await skillRegistry.install(extractDir, config);
+    const result = stagingFromPreview
+      ? await skillRegistry.installPreviewedStaged(extractDir)
+      : await skillRegistry.install(extractDir, config);
 
     if (stagingFromPreview && isSafePreviewId(previewId) && result.success) {
       const stagingPath = path.join(previewsDir, previewId);

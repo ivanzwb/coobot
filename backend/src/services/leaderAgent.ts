@@ -155,7 +155,7 @@ export class LeaderAgent extends EventEmitter {
     subtasks: DAGNode[];
     leaderUsage: { prompt: number; completion: number; total: number };
   }> {
-    const context = await memoryEngine.getActiveHistory(5);
+    const context = await memoryEngine.getActiveHistory(5, 'LEADER');
     const historyText = context.map(h => `${h.role}: ${h.content}`).join('\n');
 
     const leaderRows = await db.select().from(schema.agents).where(eq(schema.agents.id, this.leaderAgentId));

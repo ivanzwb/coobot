@@ -1,88 +1,22 @@
 import * as fs from 'fs';
 import type { SkillHub, ToolDefinition } from '@biosbot/agent-brain';
+import { SKILL_TOOL_DEFINITIONS } from '@biosbot/agent-brain/dist/skill/skill-tool-definitions.js';
 import { SkillFramework } from '@biosbot/agent-skills';
 import type { CoobotBrainSession } from './coobotBrainSession.js';
 
-/** Ported from agent-brain demo `demo/src/skill-hub-adapter.ts` — framework tool schemas for the LLM. */
-const FRAMEWORK_TOOL_DECLARATIONS: ToolDefinition[] = [
-  {
-    name: 'skill_find',
-    description: 'Search for available skills from the online skill registry by keyword.',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Search keyword or phrase to find relevant skills' },
-      },
-      required: ['query'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'skill_list',
-    description:
-      'List locally installed skills (Coobot: only skills assigned to this agent). Returns names and descriptions.',
-    parameters: { type: 'object', properties: {}, additionalProperties: false },
-  },
-  {
-    name: 'skill_install',
-    description:
-      'Install a skill from the online registry or a direct source. Accepts a skill name from skill_find, npm package, URL, or local path.',
-    parameters: {
-      type: 'object',
-      properties: {
-        source: {
-          type: 'string',
-          description: 'Skill name from skill_find results, npm package name, URL, or local file path',
-        },
-      },
-      required: ['source'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'skill_load_main',
-    description: 'Load the main context file (main.md) of a skill.',
-    parameters: {
-      type: 'object',
-      properties: { name: { type: 'string', description: 'Name of the skill' } },
-      required: ['name'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'skill_load_reference',
-    description: "Load a reference file from a skill's reference directory.",
-    parameters: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'Name of the skill' },
-        referencePath: { type: 'string', description: 'Relative path to the reference file' },
-      },
-      required: ['name', 'referencePath'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'skill_list_tools',
-    description: 'List all tools provided by a specific skill.',
-    parameters: {
-      type: 'object',
-      properties: { name: { type: 'string', description: 'Name of the skill' } },
-      required: ['name'],
-      additionalProperties: false,
-    },
-  },
-];
+function skillHubToolMap(): Map<string, ToolDefinition> {
+  return new Map(
+    Object.values(SKILL_TOOL_DEFINITIONS).map((d) => [d.name, d] as const)
+  );
+}
 
 export class CoobotSkillHub implements SkillHub {
-  private readonly toolMap: Map<string, ToolDefinition>;
+  private readonly toolMap: Map<string, ToolDefinition> = skillHubToolMap();
 
   constructor(
     private readonly getSf: () => SkillFramework,
     private readonly session: CoobotBrainSession
-  ) {
-    this.toolMap = new Map(FRAMEWORK_TOOL_DECLARATIONS.map((d) => [d.name, d]));
-  }
+  ) {}
 
   getToolDefinition(toolName: string): ToolDefinition | undefined {
     return this.toolMap.get(toolName);
@@ -92,13 +26,13 @@ export class CoobotSkillHub implements SkillHub {
     return this.toolMap.has(toolName);
   }
 
-  async skill_find(args: Record<string, unknown>): Promise<string> {
-    const query = String(args.query ?? '');
+  async skill_find(keyword: string): Promise<string> {
+    const query = String(keyword ?? '');
     const results = await SkillFramework.searchSkills(query);
     return JSON.stringify(results);
   }
 
-  async skill_list(_args: Record<string, unknown>): Promise<string> {
+  async skill_list(): Promise<string> {
     const sf = this.getSf();
     const { skills } = sf.listSkills();
     const allowed = new Set(this.session.getAssignedSkillNames());
@@ -106,8 +40,8 @@ export class CoobotSkillHub implements SkillHub {
     return JSON.stringify({ skills: filtered });
   }
 
-  async skill_install(args: Record<string, unknown>): Promise<string> {
-    const source = String(args.source ?? '').trim();
+  async skill_install(name: string): Promise<string> {
+    const source = String(name ?? '').trim();
     if (!source) return JSON.stringify({ error: 'Missing source' });
     const sf = this.getSf();
     try {
@@ -119,42 +53,42 @@ export class CoobotSkillHub implements SkillHub {
     }
   }
 
-  async skill_load_main(args: Record<string, unknown>): Promise<string> {
-    const name = String(args.name ?? '');
-    if (!this.session.isSkillAllowed(name)) {
-      return JSON.stringify({ error: `Skill "${name}" is not assigned to this agent.` });
+  async skill_load_main(name: string): Promise<string> {
+    const n = String(name ?? '');
+    if (!this.session.isSkillAllowed(n)) {
+      return JSON.stringify({ error: `Skill "${n}" is not assigned to this agent.` });
     }
     const sf = this.getSf();
     try {
-      const main = sf.loadMain(name);
+      const main = sf.loadMain(n);
       return JSON.stringify(main);
     } catch (e) {
       return JSON.stringify({ error: String(e) });
     }
   }
 
-  async skill_load_reference(args: Record<string, unknown>): Promise<string> {
-    const name = String(args.name ?? '');
-    const referencePath = String(args.referencePath ?? '');
-    if (!this.session.isSkillAllowed(name)) {
-      return JSON.stringify({ error: `Skill "${name}" is not assigned to this agent.` });
+  async skill_load_reference(name: string, referencePath: string): Promise<string> {
+    const n = String(name ?? '');
+    const ref = String(referencePath ?? '');
+    if (!this.session.isSkillAllowed(n)) {
+      return JSON.stringify({ error: `Skill "${n}" is not assigned to this agent.` });
     }
     const sf = this.getSf();
     try {
-      const ref = sf.loadReference(name, referencePath);
-      return JSON.stringify(ref);
+      const loaded = sf.loadReference(n, ref);
+      return JSON.stringify(loaded);
     } catch (e) {
       return JSON.stringify({ error: String(e) });
     }
   }
 
-  async skill_list_tools(args: Record<string, unknown>): Promise<string> {
-    const name = String(args.name ?? '');
-    if (!this.session.isSkillAllowed(name)) {
-      return JSON.stringify({ skillName: name, tools: [], error: 'Skill not assigned to this agent' });
+  async skill_list_tools(name: string): Promise<string> {
+    const n = String(name ?? '');
+    if (!this.session.isSkillAllowed(n)) {
+      return JSON.stringify({ skillName: n, tools: [], error: 'Skill not assigned to this agent' });
     }
     const sf = this.getSf();
-    return JSON.stringify({ skillName: name, tools: sf.listTools(name) });
+    return JSON.stringify({ skillName: n, tools: sf.listTools(n) });
   }
 
   getSkillsDescription(): string[] {

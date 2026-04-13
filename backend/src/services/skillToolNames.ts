@@ -1,5 +1,5 @@
 /**
- * Canonical naming for skill tools in ToolHub: `skill:{skillDisplayName}:{logicalName}`.
+ * Canonical permission / sandbox keys for skill tools: `skill:{skillDisplayName}:{logicalName}`.
  * Models sometimes embed extra `skill:...` segments in the logical segment — normalize here.
  */
 

@@ -1,0 +1,65 @@
+diff --git a/node_modules/@biosbot/agent-memory/dist/embedding/local.js b/node_modules/@biosbot/agent-memory/dist/embedding/local.js
+index 17ea9a4..b741fc5 100644
+--- a/node_modules/@biosbot/agent-memory/dist/embedding/local.js
++++ b/node_modules/@biosbot/agent-memory/dist/embedding/local.js
+@@ -40,14 +40,20 @@ const fs = __importStar(require("fs"));
+ const http = __importStar(require("http"));
+ const tls = __importStar(require("tls"));
+ let proxyConfigured = false;
+-function configureProxy() {
++function resolveProxyUrl(explicit) {
++    if (explicit != null && String(explicit).trim() !== '') {
++        return String(explicit).trim();
++    }
++    return (process.env.HTTPS_PROXY ||
++        process.env.https_proxy ||
++        process.env.HTTP_PROXY ||
++        process.env.http_proxy);
++}
++function configureProxy(explicitProxyUrl) {
+     if (proxyConfigured)
+         return;
+     proxyConfigured = true;
+-    const proxyUrl = process.env.HTTPS_PROXY ||
+-        process.env.https_proxy ||
+-        process.env.HTTP_PROXY ||
+-        process.env.http_proxy;
++    const proxyUrl = resolveProxyUrl(explicitProxyUrl);
+     if (!proxyUrl)
+         return;
+     const proxy = new URL(proxyUrl);
+@@ -150,9 +156,11 @@ class LocalEmbeddingProvider {
+     pipeline = null;
+     modelDir;
+     initPromise = null;
+-    constructor(dataDir) {
++    proxyUrl;
++    constructor(dataDir, options) {
+         this.modelDir = path.join(dataDir, 'models');
+         fs.mkdirSync(this.modelDir, { recursive: true });
++        this.proxyUrl = options?.proxyUrl;
+     }
+     async initialize() {
+         if (this.pipeline)
+@@ -166,7 +174,7 @@ class LocalEmbeddingProvider {
+     }
+     async doInit() {
+         try {
+-            configureProxy();
++            configureProxy(this.proxyUrl);
+             // Dynamic import to avoid issues if transformers is not available
+             const { pipeline, env } = await Promise.resolve().then(() => __importStar(require('@xenova/transformers')));
+             // Cache models in our data directory
+diff --git a/node_modules/@biosbot/agent-memory/dist/memory.js b/node_modules/@biosbot/agent-memory/dist/memory.js
+index 5c5faff..7ac5e2a 100644
+--- a/node_modules/@biosbot/agent-memory/dist/memory.js
++++ b/node_modules/@biosbot/agent-memory/dist/memory.js
+@@ -69,7 +69,7 @@ class AgentMemoryImpl {
+      */
+     static async create(userConfig) {
+         const dataDir = userConfig?.dataDir ?? DEFAULTS.dataDir;
+-        const embedding = userConfig?.embedding ?? new local_1.LocalEmbeddingProvider(dataDir);
++        const embedding = userConfig?.embedding ?? new local_1.LocalEmbeddingProvider(dataDir, { proxyUrl: userConfig?.proxyUrl });
+         const config = {
+             dataDir,
+             embedding,

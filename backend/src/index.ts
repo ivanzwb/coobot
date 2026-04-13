@@ -5,10 +5,12 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';
 import cron from 'node-cron';
 import routes from './routes/index.js';
-import { configManager, initializeDatabase, schedulerService, agentCapabilityRegistry, taskOrchestrator, vectorStore, monitorService, memoryEngine, logger, backupService, skillRegistry } from './services/index.js';
+import { configManager, initializeDatabase, schedulerService, agentCapabilityRegistry, taskOrchestrator, monitorService, memoryEngine, logger, backupService, skillRegistry } from './services/index.js';
 import {
-  ensureAgentMemory,
+  ensureAgentMemoryForAgent,
+  migrateLegacyGlobalAgentMemoryIfNeeded,
   warmupAgentMemoryEmbedding,
+  ensureAllRegisteredAgentDirs,
   initAgentBrainCronHub,
   disposeAgentBrainCronHub,
   formatCronJobUserInput,
@@ -35,8 +37,9 @@ async function bootstrap() {
     await configManager.ensureWorkspaceInitialized();
 
     await initializeDatabase();
-    await vectorStore.initialize();
-    await ensureAgentMemory();
+    migrateLegacyGlobalAgentMemoryIfNeeded();
+    await ensureAllRegisteredAgentDirs();
+    await ensureAgentMemoryForAgent('LEADER');
     await warmupAgentMemoryEmbedding();
     await agentCapabilityRegistry.loadFromDatabase();
     await skillRegistry.registerAllSkillTools();

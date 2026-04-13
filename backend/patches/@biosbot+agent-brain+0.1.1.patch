@@ -1,0 +1,68 @@
+diff --git a/node_modules/@biosbot/agent-brain/dist/knowledge/knowledge-tools.js b/node_modules/@biosbot/agent-brain/dist/knowledge/knowledge-tools.js
+index 19b5e55..a255881 100644
+--- a/node_modules/@biosbot/agent-brain/dist/knowledge/knowledge-tools.js
++++ b/node_modules/@biosbot/agent-brain/dist/knowledge/knowledge-tools.js
+@@ -21,7 +21,7 @@ class KnowledgeAddTool {
+         this.hub = hub;
+     }
+     async execute(args) {
+-        const source = args['source '];
++        const source = args['source'];
+         const title = args['title'];
+         const content = args['content'];
+         const metadata = args['metadata'];
+diff --git a/node_modules/@biosbot/agent-brain/dist/react/react-loop.js b/node_modules/@biosbot/agent-brain/dist/react/react-loop.js
+index 2fb9256..438ffb6 100644
+--- a/node_modules/@biosbot/agent-brain/dist/react/react-loop.js
++++ b/node_modules/@biosbot/agent-brain/dist/react/react-loop.js
+@@ -172,7 +172,7 @@ class ReactLoop {
+                 try {
+                     observation = await this.innateToolHub.execute(call.name, call.arguments);
+                     if (call.name === 'skill_load_main' || call.name === 'skill_load_reference') {
+-                        const skillName = call.arguments['skillName'];
++                        const skillName = call.arguments['skillName'] ?? call.arguments['name'];
+                         skillTools = this.skillHub.getTools(skillName);
+                     }
+                 }
+@@ -183,8 +183,18 @@ class ReactLoop {
+             }
+             else {
+                 try {
+-                    const skillName = call.arguments['skillName'];
+-                    observation = await this.skillHub.execute(skillName, call.name, call.arguments);
++                    let skillName = call.arguments['skillName'];
++                    let toolName = call.name;
++                    if (typeof toolName === 'string' && toolName.startsWith('skill.')) {
++                        const rest = toolName.slice('skill.'.length);
++                        const lastDot = rest.lastIndexOf('.');
++                        if (lastDot > 0) {
++                            if (skillName == null || skillName === '')
++                                skillName = rest.slice(0, lastDot);
++                            toolName = rest.slice(lastDot + 1);
++                        }
++                    }
++                    observation = await this.skillHub.execute(skillName, toolName, call.arguments);
+                 }
+                 catch (err) {
+                     controller.recordFailure();
+@@ -211,9 +221,19 @@ class ReactLoop {
+             return undefined;
+         // Determine action category from the tool's self-declared metadata
+         const action = this.innateToolHub.getActionCategory(toolName) ?? 'skill_exec';
+-        const target = this.innateToolHub.hasTool(toolName)
++        let target = this.innateToolHub.hasTool(toolName)
+             ? this.innateToolHub.getPermissionTarget(toolName, args)
+             : `${args['skillName'] ?? ''}:${toolName}`;
++        // Align with host `agent_tool_permissions` keys `skill:segment:logical` for sandbox rules.
++        if (action === 'skill_exec' && typeof toolName === 'string' && toolName.startsWith('skill.')) {
++            const rest = toolName.slice('skill.'.length);
++            const lastDot = rest.lastIndexOf('.');
++            if (lastDot > 0) {
++                const seg = rest.slice(0, lastDot);
++                const logical = rest.slice(lastDot + 1);
++                target = `skill:${seg}:${logical}`;
++            }
++        }
+         // Resolve relative paths for fs tools
+         const resolvedTarget = action.startsWith('fs_')
+             ? this.sandbox.resolvePath(target)

@@ -8,9 +8,9 @@ import { EventEmitter } from 'events';
 import { eventBus } from './eventBus.js';
 import { leaderAgent } from './leaderAgent.js';
 import { logger } from './logger.js';
-import { memoryEngine } from './memoryEngine.js';
+import { ensureAgentMemoryForAgent } from './agentBrain/agentMemoryBootstrap.js';
 import { skillRegistry } from './skillRegistry.js';
-import { toolHub } from './toolHub.js';
+import { listBuiltinToolNames } from './builtinToolCatalog.js';
 
 export class TaskOrchestrator extends EventEmitter {
   private taskQueue: Map<string, Task> = new Map();
@@ -476,7 +476,7 @@ export class TaskOrchestrator extends EventEmitter {
       }
     }
 
-    const agentTools = toolHub.listBuiltinTools().map((t) => t.name);
+    const agentTools = listBuiltinToolNames();
 
     logger.info('TaskOrchestrator', 'buildAgentConfig', {
       agentId: agent.id,
@@ -671,19 +671,17 @@ export class TaskOrchestrator extends EventEmitter {
       if (observations.length > 50) {
         const summary = `Task completed. Key observations: ${observations.substring(0, 500)}`;
 
-        await memoryEngine.appendMessage(
-          'assistant',
-          summary,
-          undefined,
-          taskId
-        );
+        const aid = task[0].assignedAgentId;
+        const mem = await ensureAgentMemoryForAgent(aid);
+        await mem.appendMessage(taskId, 'assistant', summary, { taskId });
 
         if (task[0].outputSummary) {
-          await memoryEngine.addFact(
-            task[0].assignedAgentId,
-            'task_completion',
+          const key = `task_${taskId}_${Date.now()}`;
+          await mem.saveMemory(
+            'episodic',
+            key.slice(0, 120),
             task[0].outputSummary,
-            { taskId, completedAt: new Date().toISOString() }
+            0.7
           );
         }
       }

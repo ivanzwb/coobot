@@ -7,38 +7,26 @@ import { memoryEngine } from './memoryEngine';
 import { taskOrchestrator } from './taskOrchestrator';
 import { eventBus } from './eventBus.js';
 import { logger } from './logger.js';
-import { configManager } from './configManager.js';
-import {
-  AgentBrain,
-  TaskStatus,
-  StepPhase,
-  TerminationReason,
-  type PermissionRequest,
-} from '@biosbot/agent-brain';
+import { AgentBrain, TaskStatus, TerminationReason } from '@biosbot/agent-brain';
 import {
   coobotBrainSession,
-  ensureAgentMemory,
   CoobotMemoryHub,
   CoobotSkillHub,
   getSkillFramework,
+  mapBrainStepsToReAct,
 } from './agentBrain/index.js';
+import { ensureAgentMemoryForAgent } from './agentBrain/agentMemoryBootstrap.js';
+import { getAgentWorkDir } from './agentBrain/agentWorkspaceLayout.js';
 import { getAgentBrainCronHub } from './agentBrain/brainCronHubSingleton.js';
-import { brainPermissionToPolicyContext } from './agentBrain/brainToolPermissionBridge.js';
+import { loadBrainSandboxRulesForAgent } from './agentBrain/brainSandboxRules.js';
 import {
   buildAskUserFallbackAnswer,
   requestBrainUserInput,
 } from './agentBrain/brainUserInputBridge.js';
-import { authService } from './authService.js';
-import { PermissionDeniedError, SecurityError, securitySandbox } from './securitySandbox.js';
 import { MeteredOpenAIClient } from './agentBrain/meteredOpenAIClient.js';
+import type { ReActStep } from './agentBrain/mapBrainSteps.js';
 
-export interface ReActStep {
-  stepIndex: number;
-  stepType: 'THOUGHT' | 'ACTION' | 'OBSERVATION';
-  content: string;
-  toolName?: string;
-  toolArgs?: Record<string, unknown>;
-}
+export type { ReActStep };
 
 export interface AgentSkill {
   id: string;
@@ -139,7 +127,7 @@ export class AgentRuntime extends EventEmitter {
       }
 
       coobotBrainSession.reset(task.id, agentConfig.id, agentConfig.skills);
-      const agentMem = await ensureAgentMemory();
+      const agentMem = await ensureAgentMemoryForAgent(agentConfig.id);
       const memoryHub = new CoobotMemoryHub(agentMem, coobotBrainSession);
       const skillHub = new CoobotSkillHub(getSkillFramework, coobotBrainSession);
 
@@ -155,55 +143,13 @@ export class AgentRuntime extends EventEmitter {
         model: mc.modelName,
         temperature: agentConfig.temperature ?? mc.temperature ?? 0.2,
         timeoutMs: 120_000,
+        contextWindow: mc.contextWindow ?? 128_000,
       });
       const model = meteredModel;
 
       const systemPrompt = await this.buildSystemPrompt(agentConfig);
 
-      const brainSandboxAskHandler = async (request: PermissionRequest): Promise<boolean> => {
-        const { policyToolName, sandboxArgs, policyAliases } = brainPermissionToPolicyContext(request);
-        try {
-          const perm = await securitySandbox.intercept(
-            agentConfig.id,
-            policyToolName,
-            sandboxArgs,
-            policyAliases.length ? policyAliases : undefined
-          );
-          if (perm.policy === 'ASK') {
-            await authService.waitForAuthorization(
-              agentConfig.id,
-              policyToolName,
-              {
-                source: 'agent_brain',
-                action: request.action,
-                target: request.target,
-                detail: request.detail,
-                brainTool: request.toolName,
-                ...sandboxArgs,
-              },
-              task.id
-            );
-          }
-          return true;
-        } catch (e) {
-          if (e instanceof PermissionDeniedError) {
-            logger.warn('AgentRuntime', 'AgentBrain tool denied by policy', {
-              taskId: task.id,
-              policyToolName,
-              brainTool: request.toolName,
-            });
-            return false;
-          }
-          if (e instanceof SecurityError) {
-            logger.warn('AgentRuntime', 'AgentBrain sandbox security rejected', {
-              taskId: task.id,
-              message: e.message,
-            });
-            return false;
-          }
-          throw e;
-        }
-      };
+      const dbSandboxRules = await loadBrainSandboxRulesForAgent(agentConfig.id);
 
       const brain = new AgentBrain({
         model,
@@ -212,17 +158,12 @@ export class AgentRuntime extends EventEmitter {
         skills: skillHub,
         cron: getAgentBrainCronHub(),
         sandbox: {
-          workingDirectory: configManager.getWorkspacePath(),
+          workingDirectory: getAgentWorkDir(agentConfig.id),
           defaultPermission: 'ASK',
-          rules: [
-            { action: 'web_fetch', permission: 'ALLOW' },
-            { action: 'web_search', permission: 'ALLOW' },
-          ],
-          askHandler: brainSandboxAskHandler,
+          rules: dbSandboxRules,
         },
         config: {
           systemPrompt,
-          modelContextSize: 128_000,
           maxSteps: this.brainMaxSteps,
           maxReplans: this.brainMaxReplans,
         },
@@ -297,18 +238,7 @@ export class AgentRuntime extends EventEmitter {
         );
       }
 
-      const stepsForEmit: ReActStep[] = result.steps.map((s, i) => {
-        let stepType: ReActStep['stepType'] = 'THOUGHT';
-        if (s.phase === StepPhase.ACTION) stepType = 'ACTION';
-        else if (s.phase === StepPhase.OBSERVATION) stepType = 'OBSERVATION';
-        return {
-          stepIndex: i,
-          stepType,
-          content: s.content,
-          toolName: s.toolName,
-          toolArgs: s.toolArguments,
-        };
-      });
+      const stepsForEmit = mapBrainStepsToReAct(result.steps ?? []);
 
       this.emit('task_completed', { taskId: task.id, steps: stepsForEmit });
     } catch (error) {
@@ -342,6 +272,13 @@ export class AgentRuntime extends EventEmitter {
       parts.push(`\nBehavior Guidelines:\n${agentConfig.behaviorRules}`);
     }
     parts.push(`\nAlways respond in the same language as the user's input.`);
+
+    parts.push(
+      `\n## Built-in (innate) tools\n` +
+        `- **Scheduling**: In-app recurring work uses **cron_** tools (e.g. \`cron_add\`, UTC cron).\n` +
+        `- **ask_user**: Do not use it to ask which phone, PC, or third-party app unless the user needs an integration outside this app; use **cron_** for in-product reminders.\n` +
+        `- **Skill registry**: If the user asks to find/search/list online skills, call \`skill_find\` with a short \`query\`, then answer from the JSON — do not invent results.`
+    );
 
     if (agentConfig.capabilityBoundary) {
       parts.push(`\nCapability Boundaries:\n${agentConfig.capabilityBoundary}`);

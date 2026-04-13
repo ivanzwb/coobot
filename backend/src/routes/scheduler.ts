@@ -137,7 +137,7 @@ router.get('/agent-brain-jobs', (_req: Request, res: Response) => {
 router.delete('/agent-brain-jobs/:id', async (req: Request, res: Response) => {
   try {
     const jobId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
-    const raw = await getAgentBrainCronHub().cron_delete({ id: jobId });
+    const raw = await getAgentBrainCronHub().cron_delete(jobId);
     const parsed = JSON.parse(raw) as { status: string; message?: string };
     if (parsed.status === 'error') {
       return res.status(404).json(parsed);
@@ -151,7 +151,7 @@ router.delete('/agent-brain-jobs/:id', async (req: Request, res: Response) => {
 router.post('/agent-brain-jobs/:id/trigger', async (req: Request, res: Response) => {
   try {
     const jobId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
-    const raw = await getAgentBrainCronHub().cron_run_now({ id: jobId });
+    const raw = await getAgentBrainCronHub().cron_run_now(jobId);
     const parsed = JSON.parse(raw) as { status: string; message?: string };
     if (parsed.status === 'error') {
       return res.status(404).json(parsed);
@@ -165,7 +165,7 @@ router.post('/agent-brain-jobs/:id/trigger', async (req: Request, res: Response)
 router.post('/agent-brain-jobs/:id/pause', async (req: Request, res: Response) => {
   try {
     const jobId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
-    const raw = await getAgentBrainCronHub().cron_pause({ id: jobId });
+    const raw = await getAgentBrainCronHub().cron_pause(jobId);
     const parsed = JSON.parse(raw) as { status: string; message?: string };
     if (parsed.status === 'error') {
       return res.status(404).json(parsed);
@@ -179,7 +179,7 @@ router.post('/agent-brain-jobs/:id/pause', async (req: Request, res: Response) =
 router.post('/agent-brain-jobs/:id/resume', async (req: Request, res: Response) => {
   try {
     const jobId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
-    const raw = await getAgentBrainCronHub().cron_resume({ id: jobId });
+    const raw = await getAgentBrainCronHub().cron_resume(jobId);
     const parsed = JSON.parse(raw) as { status: string; message?: string };
     if (parsed.status === 'error') {
       return res.status(404).json(parsed);

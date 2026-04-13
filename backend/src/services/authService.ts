@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { eventBus } from './eventBus.js';
-import { PermissionDeniedError } from './securitySandbox.js';
+import { PermissionDeniedError } from './permissionErrors.js';
 import { persistAgentToolPolicy } from './agentToolPermissionPersistence.js';
 
 function sanitizeArgs(args: Record<string, unknown>): Record<string, unknown> {

@@ -2,7 +2,8 @@ import { Router, Request, Response } from 'express';
 import { db, schema } from '../db/index.js';
 import { eq, and } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { agentCapabilityRegistry, toolHub, knowledgeEngine, skillRegistry } from '../services/index.js';
+import { agentCapabilityRegistry, listBuiltinToolNames, skillRegistry } from '../services/index.js';
+import { ingestKnowledgeFile } from '../services/agentBrain/coobotKnowledgeFiles.js';
 import { getSkillNamesByAgentIds, getSkillNamesForAgent } from '../db/agentSkillQueries.js';
 import { persistAgentToolPolicy } from '../services/agentToolPermissionPersistence.js';
 import { ensureAgentSkillToolPermissions } from '../services/ensureAgentSkillToolPermissions.js';
@@ -11,7 +12,7 @@ const router = Router();
 
 /** API: builtin names align with AgentBrain→sandbox permission keys; skill tools via agent_skills / AgentBrain. */
 function builtinToolNames(): string[] {
-  return toolHub.listBuiltinTools().map((t) => t.name);
+  return listBuiltinToolNames();
 }
 
 router.get('/capabilities', async (_req: Request, res: Response) => {
@@ -63,7 +64,7 @@ router.get('/', async (_req: Request, res: Response) => {
 router.post('/:id/knowledge/upload', async (req: Request, res: Response) => {
   try {
     const { file, overwriteVersion } = req.body;
-    const knowledgeFile = await knowledgeEngine.ingestFile(
+    const knowledgeFile = await ingestKnowledgeFile(
       file,
       req.params.id as string,
       overwriteVersion
@@ -169,7 +170,7 @@ router.post('/', async (req: Request, res: Response) => {
       name,
       status: 'ONLINE',
       skills: skills || [],
-      tools: toolHub.listBuiltinTools().map((t) => t.name),
+      tools: listBuiltinToolNames(),
       rolePrompt: rolePrompt || '',
       behaviorRules: behaviorRules || '',
       capabilityBoundary: capabilityBoundary || '',

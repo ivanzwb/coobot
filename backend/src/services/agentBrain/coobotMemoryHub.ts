@@ -10,7 +10,6 @@ import {
   aggregateKnowledgeFiles,
   chunkMetadata,
   coobotKnowledgeSource,
-  chunksForFileId,
   filterKnowledgeByAgent,
   removeKnowledgeChunksForFile,
 } from './agentMemoryKnowledge.js';
@@ -38,22 +37,29 @@ export class CoobotMemoryHub implements MemoryHub, KnowledgeHub {
     return toolName in DEFS;
   }
 
-  async conversation_track(_conversationId: string, role: string, content: string): Promise<void> {
-    const id = this.session.conversationId;
+  async conversation_track(conversationId: string, role: string, content: string): Promise<void> {
+    const id = conversationId || this.session.conversationId;
     if (!id) return;
-    await this.mem.appendMessage(id, role as MessageRole, content);
+    const r = role as MessageRole;
+    if (r === 'user' || r === 'assistant') {
+      const recent = await this.mem.getConversation(id, 8);
+      const last = recent[recent.length - 1];
+      if (last && last.role === r && last.content.trim() === content.trim()) {
+        return;
+      }
+    }
+    await this.mem.appendMessage(id, r, content);
   }
 
-  async conversation_search(args: Record<string, unknown>): Promise<string> {
-    const query = String(args.query ?? '');
-    const limit = typeof args.limit === 'number' ? args.limit : 10;
+  async conversation_search(query: string, limit = 10): Promise<string> {
+    const lim = Math.min(50, Math.max(1, limit));
     const id = this.session.conversationId;
     if (!id) return JSON.stringify({ results: [] });
-    const msgs = await this.mem.getConversation(id, Math.min(200, limit * 20));
+    const msgs = await this.mem.getConversation(id, Math.min(200, lim * 20));
     const q = query.toLowerCase();
     const results = msgs
       .filter((m) => m.content.toLowerCase().includes(q))
-      .slice(0, limit)
+      .slice(0, lim)
       .map((m) => ({
         role: m.role,
         content: m.content,
@@ -62,21 +68,25 @@ export class CoobotMemoryHub implements MemoryHub, KnowledgeHub {
     return JSON.stringify({ results });
   }
 
-  async conversation_compress(_args: Record<string, unknown>): Promise<string> {
+  async conversation_history(limit = 20): Promise<string> {
+    const lim = Math.min(200, Math.max(1, limit));
+    const id = this.session.conversationId;
+    if (!id) return JSON.stringify({ messages: [] });
+    const messages = await this.mem.getConversation(id, lim);
     return JSON.stringify({
-      status: 'skipped',
-      message: 'Conversation compression is handled by agent-memory archive; no manual compress in Coobot.',
+      messages: messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+        timestamp: new Date(m.createdAt).toISOString(),
+      })),
     });
   }
 
-  async memory_search(args: Record<string, unknown>): Promise<string> {
-    const query = String(args.query ?? '');
-    const topK = typeof args.topK === 'number' ? args.topK : 5;
-    const category = args.category as MemoryCategory | undefined;
-    const raw = await this.mem.searchMemory(query, topK);
-    const results = category ? raw.filter((r) => r.category === category) : raw;
+  async memory_search(query: string, topK = 5): Promise<string> {
+    const k = Math.min(50, Math.max(1, topK));
+    const raw = await this.mem.searchMemory(query, k);
     return JSON.stringify({
-      results: results.map((r) => ({
+      results: raw.map((r) => ({
         id: r.id,
         category: r.category,
         key: r.key,
@@ -86,19 +96,16 @@ export class CoobotMemoryHub implements MemoryHub, KnowledgeHub {
     });
   }
 
-  async memory_save(args: Record<string, unknown>): Promise<string> {
-    const key = String(args.key ?? '');
-    const value = String(args.value ?? '');
-    const category = (args.category as MemoryCategory) || 'fact';
+  async memory_save(key: string, value: string): Promise<string> {
+    const category: MemoryCategory = 'fact';
     const id = await this.mem.saveMemory(category, key, value, 1);
     return JSON.stringify({ id, status: 'saved', key });
   }
 
-  async memory_list(args: Record<string, unknown>): Promise<string> {
-    const limit = typeof args.limit === 'number' ? args.limit : 20;
-    const category = args.category as MemoryCategory | undefined;
-    const items = await this.mem.listMemories(category ? { category } : undefined);
-    const sliced = items.slice(0, limit);
+  async memory_history(limit = 20): Promise<string> {
+    const lim = Math.min(100, Math.max(1, limit));
+    const items = await this.mem.listMemories(undefined);
+    const sliced = items.slice(0, lim);
     return JSON.stringify({
       items: sliced.map((i) => ({
         id: i.id,
@@ -110,34 +117,19 @@ export class CoobotMemoryHub implements MemoryHub, KnowledgeHub {
     });
   }
 
-  async memory_delete(args: Record<string, unknown>): Promise<string> {
-    const id = String(args.id ?? '');
+  async memory_delete(id: string): Promise<string> {
     await this.mem.deleteMemory(id);
     return JSON.stringify({ status: 'deleted', id });
   }
 
-  async memory_get_history(args: Record<string, unknown>): Promise<string> {
-    const limit = typeof args.limit === 'number' ? args.limit : 20;
-    const id = this.session.conversationId;
-    if (!id) return JSON.stringify({ messages: [] });
-    const messages = await this.mem.getConversation(id, limit);
-    return JSON.stringify({
-      messages: messages.map((m) => ({
-        role: m.role,
-        content: m.content,
-        timestamp: new Date(m.createdAt).toISOString(),
-      })),
-    });
-  }
-
   // —— Knowledge (agent-memory KB, scoped by agent) ——
 
-  async knowledge_list(args: Record<string, unknown>): Promise<string> {
+  async knowledge_list(source?: string): Promise<string> {
     const agentId = this.session.agentId;
     if (!agentId) return JSON.stringify({ items: [], total: 0, hasMore: false });
-    const limit = typeof args.limit === 'number' ? Math.min(args.limit, 100) : 20;
-    const offset = typeof args.offset === 'number' ? args.offset : 0;
-    const categoryFilter = typeof args.category === 'string' ? args.category : undefined;
+    const limit = 20;
+    const offset = 0;
+    const categoryFilter = source;
     const src = coobotKnowledgeSource(agentId);
     const all = await this.mem.listKnowledge(src);
     const rows = categoryFilter
@@ -158,17 +150,20 @@ export class CoobotMemoryHub implements MemoryHub, KnowledgeHub {
     });
   }
 
-  async knowledge_add(args: Record<string, unknown>): Promise<string> {
+  async knowledge_add(
+    source: string,
+    title: string,
+    content: string,
+    metadata?: Record<string, unknown>
+  ): Promise<string> {
     const agentId = this.session.agentId;
     if (!agentId) return JSON.stringify({ error: 'No agent context' });
-    const title = String(args.title ?? '');
-    const content = String(args.content ?? '');
     if (!title || !content) {
       return JSON.stringify({ error: 'title and content are required' });
     }
-    const category = typeof args.category === 'string' ? args.category : 'knowledge';
-    const tags = Array.isArray(args.tags) ? args.tags : undefined;
-    const metaIn = args.metadata && typeof args.metadata === 'object' ? (args.metadata as Record<string, unknown>) : {};
+    const category = source || 'knowledge';
+    const metaIn = metadata && typeof metadata === 'object' ? { ...metadata } : {};
+    const tags = Array.isArray(metaIn.tags) ? metaIn.tags : undefined;
     const fileId = `kb_manual_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const id = await this.mem.addKnowledge(coobotKnowledgeSource(agentId), title, content, {
       ...metaIn,
@@ -182,25 +177,28 @@ export class CoobotMemoryHub implements MemoryHub, KnowledgeHub {
     return JSON.stringify({ id, status: 'created', title });
   }
 
-  async knowledge_delete(args: Record<string, unknown>): Promise<string> {
+  async knowledge_delete(id: string, _force?: boolean): Promise<string> {
     const agentId = this.session.agentId;
     if (!agentId) return JSON.stringify({ error: 'No agent context' });
-    const id = String(args.id ?? '');
     await removeKnowledgeChunksForFile(this.mem, agentId, id);
     return JSON.stringify({ status: 'deleted', id });
   }
 
-  async knowledge_search(args: Record<string, unknown>): Promise<string> {
+  async knowledge_search(
+    query: string,
+    topK = 5,
+    category?: string,
+    _tags?: string[],
+    _threshold?: number
+  ): Promise<string> {
     const agentId = this.session.agentId;
     if (!agentId) return JSON.stringify({ results: [] });
-    const query = String(args.query ?? '');
-    const topK = typeof args.topK === 'number' ? Math.min(args.topK, 50) : 5;
-    const raw = await this.mem.searchKnowledge(query, Math.min(80, topK * 15));
+    const k = Math.min(50, Math.max(1, topK));
+    const raw = await this.mem.searchKnowledge(query, Math.min(80, k * 15));
     const filtered = filterKnowledgeByAgent(raw, agentId);
-    const category = typeof args.category === 'string' ? args.category : undefined;
     const scored = (
       category ? filtered.filter((c) => String(chunkMetadata(c).category ?? '') === category) : filtered
-    ).slice(0, topK);
+    ).slice(0, k);
     return JSON.stringify({
       results: scored.map((h, i) => ({
         id: h.id,
@@ -210,40 +208,5 @@ export class CoobotMemoryHub implements MemoryHub, KnowledgeHub {
         metadata: { ...chunkMetadata(h), chunkIndex: chunkMetadata(h).chunkIndex ?? i },
       })),
     });
-  }
-
-  async knowledge_read(args: Record<string, unknown>): Promise<string> {
-    const agentId = this.session.agentId;
-    if (!agentId) return JSON.stringify({ error: 'No agent context' });
-    const id = String(args.id ?? '');
-    const includeMetadata = args.includeMetadata === true;
-    const src = coobotKnowledgeSource(agentId);
-    const all = await this.mem.listKnowledge(src);
-    const parts = chunksForFileId(all, id);
-    if (parts.length === 0) {
-      const one = all.find((c) => c.id === id);
-      if (!one) return JSON.stringify({ error: 'File not found', id });
-      const m = chunkMetadata(one);
-      const base = {
-        id: one.id,
-        title: String(m.fileName ?? one.title),
-        content: one.content,
-        category: String(m.category ?? 'knowledge'),
-        createdAt: new Date(one.createdAt).toISOString(),
-      };
-      return JSON.stringify(
-        includeMetadata ? { ...base, metadata: m, tags: m.tags } : base
-      );
-    }
-    const content = parts.map((p) => p.content).join('\n\n');
-    const m0 = chunkMetadata(parts[0]!);
-    const base = {
-      id,
-      title: String(m0.fileName ?? parts[0]!.title),
-      content,
-      category: String(m0.category ?? 'knowledge'),
-      createdAt: new Date(parts[0]!.createdAt).toISOString(),
-    };
-    return JSON.stringify(includeMetadata ? { ...base, metadata: m0 } : base);
   }
 }

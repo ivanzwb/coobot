@@ -1,7 +1,8 @@
 import type { StepLog } from '@biosbot/agent-brain';
 import { StepPhase } from '@biosbot/agent-brain';
 
-export interface MappedReActStep {
+/** Task / UI step shape derived from agent-brain {@link StepLog}. */
+export interface ReActStep {
   stepIndex: number;
   stepType: 'THOUGHT' | 'ACTION' | 'OBSERVATION';
   content: string;
@@ -9,9 +10,9 @@ export interface MappedReActStep {
   toolArgs?: Record<string, unknown>;
 }
 
-export function mapBrainStepsToReAct(steps: StepLog[]): MappedReActStep[] {
+export function mapBrainStepsToReAct(steps: StepLog[]): ReActStep[] {
   return steps.map((s, i) => {
-    let stepType: MappedReActStep['stepType'] = 'THOUGHT';
+    let stepType: ReActStep['stepType'] = 'THOUGHT';
     if (s.phase === StepPhase.ACTION) stepType = 'ACTION';
     else if (s.phase === StepPhase.OBSERVATION) stepType = 'OBSERVATION';
     return {

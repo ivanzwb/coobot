@@ -78,17 +78,6 @@ export class ConfigManager {
     return path.join(databaseDir, 'biosbot.db');
   }
 
-  getMemoryVectorStorePath(): string {
-    const workspacePath = configManager.getWorkspacePath();
-    const vectorStoreDir = path.join(workspacePath, 'database', 'vectors');
-
-    if (!fs.existsSync(vectorStoreDir)) {
-      fs.mkdirSync(vectorStoreDir, { recursive: true });
-    }
-
-    return vectorStoreDir;
-  }
-
   getConfig(): SystemConfig {
     return this.config;
   }
