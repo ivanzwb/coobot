@@ -1,5 +1,4 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { useAppStore } from './stores/appStore';
 import Sidebar from './components/Sidebar';
 import ChatView from './pages/ChatView';
 import AgentsView from './pages/AgentsView';
@@ -13,13 +12,11 @@ import SchedulerView from './pages/SchedulerView';
 import './App.css';
 
 function App() {
-  const { sidebarOpen } = useAppStore();
-
   return (
     <BrowserRouter>
       <div className="app">
         <Sidebar />
-        <main className={`main-content ${sidebarOpen ? '' : 'sidebar-closed'}`}>
+        <main className="main-content">
           <Routes>
             <Route path="/" element={<ChatView />} />
             <Route path="/chat" element={<ChatView />} />

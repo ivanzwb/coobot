@@ -748,6 +748,8 @@ const ChatView: React.FC = () => {
                     background: 'rgba(255,255,255,0.7)',
                     borderRadius: 4,
                     fontSize: 11,
+                    maxWidth: '100%',
+                    minWidth: 0,
                     maxHeight: 160,
                     overflow: 'auto',
                     whiteSpace: 'pre-wrap',
